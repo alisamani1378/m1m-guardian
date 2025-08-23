@@ -60,11 +60,28 @@ def remove_node(path):
 def edit_limits(path):
     cfg=load(path); ensure_defaults(cfg)
     print("Current inbound limits:", cfg["inbounds_limit"])
+    print("Instructions: enter inbound name to set/update limit; prefix with '-' to delete (except 'default'); enter 'done' to finish.")
     while True:
-        k=prompt("Inbound name (or 'done' to finish)","done")
+        k=prompt("Inbound name (or 'done' to finish)","done").strip()
         if k.lower()=="done": break
-        v=int(prompt(f"Max concurrent IPs for '{k}'", "1"))
+        if not k: continue
+        if k.startswith('-'):
+            target=k[1:].strip()
+            if target=="default":
+                print("Cannot delete 'default'.")
+            elif target in cfg["inbounds_limit"]:
+                del cfg["inbounds_limit"][target]
+                print(f"[ok] deleted inbound limit '{target}'")
+            else:
+                print(f"No such inbound '{target}'")
+            continue
+        try:
+            v_input=prompt(f"Max concurrent IPs for '{k}'", "1").strip()
+            v=int(v_input)
+        except ValueError:
+            print("Enter an integer."); continue
         cfg["inbounds_limit"][k]=v
+        print(f"[ok] set {k}={v}")
     save(path,cfg)
     print("[ok] saved limits")
 
