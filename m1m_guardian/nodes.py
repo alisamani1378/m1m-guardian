@@ -31,6 +31,8 @@ async def run_ssh(spec:NodeSpec, remote_cmd:str) -> int:
 async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
     container = shlex.quote(spec.docker_container)
     inner = r'''set -e
+
+
 SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
 if ! command -v docker >/dev/null 2>&1; then echo "[guardian-stream] no_docker"; exit 41; fi
 # Check container; if missing try auto-discover one containing xray

@@ -28,15 +28,13 @@ async def amain(config_path:str, log_level:str):
     setup_logging(log_level)
     cfg = load(config_path); ensure_defaults(cfg)
     logging.getLogger("guardian.start").info(
-        "config loaded: nodes=%d ports=%s fallback_limit=%s cross_node_ban=%s ban_minutes=%s",
-        len(cfg.get("nodes",[])), cfg.get("ports"), cfg.get("fallback_limit"), cfg.get("cross_node_ban"), cfg.get("ban_minutes")
+        "config loaded: nodes=%d ban_minutes=%s cross_node_ban=%s",
+        len(cfg.get("nodes",[])), cfg.get("ban_minutes"), cfg.get("cross_node_ban")
     )
     store = Store(cfg["redis"]["url"])
     nodes = make_nodes(cfg)
-    limits = cfg["inbounds_limit"]
-    fallback = int(cfg.get("fallback_limit", 1))
+    limits = cfg.get("inbounds_limit", {})
     ban_minutes = int(cfg.get("ban_minutes",10))
-    ports = list(cfg.get("ports",[8080,5540,2222]))
     cross = bool(cfg.get("cross_node_ban", True))
 
     if not nodes:
@@ -45,8 +43,8 @@ async def amain(config_path:str, log_level:str):
 
     watchers=[]
     for spec in nodes:
-        logging.getLogger("guardian.start").debug("starting watcher for node=%s host=%s ports=%s", spec.name, spec.host, ports)
-        watchers.append(NodeWatcher(spec, store, limits, ban_minutes, ports, nodes, cross, fallback).run())
+        logging.getLogger("guardian.start").debug("starting watcher for node=%s host=%s", spec.name, spec.host)
+        watchers.append(NodeWatcher(spec, store, limits, ban_minutes, nodes, cross).run())
 
     logging.info("Starting %d node watchers...", len(watchers))
     await asyncio.gather(*watchers)

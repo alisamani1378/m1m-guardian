@@ -12,20 +12,13 @@ def ensure_defaults(cfg:dict):
     cfg.setdefault("redis", {"url":"redis://127.0.0.1:6379/0"})
     cfg.setdefault("ban_minutes", 10)
     cfg.setdefault("cross_node_ban", True)
-    # Ports semantics: ['*'] => flush all; [] => disable; list[int] => specific
-    if "ports" not in cfg or cfg["ports"] in (None, "", "*"):
-        cfg["ports"] = ["*"]
-    # normalize scalar port to list
+    if "ports" not in cfg or cfg["ports"] in (None, ""):
+        cfg["ports"] = []  # empty list means no conntrack flush
     if isinstance(cfg.get("ports"), int):
-        cfg["ports"] = [cfg["ports"]]
+        cfg["ports"]=[cfg["ports"]]
     cfg.setdefault("inbounds_limit", {})
-    if "fallback_limit" not in cfg:
-        legacy_default = None
-        if isinstance(cfg.get("inbounds_limit"), dict) and "default" in cfg["inbounds_limit"]:
-            legacy_default = cfg["inbounds_limit"].get("default")
-        cfg["fallback_limit"] = int(legacy_default if legacy_default is not None else 1)
     if not isinstance(cfg.get("nodes"), list):
-        cfg["nodes"] = []
+        cfg["nodes"]=[]
     cfg.setdefault("nodes", [])
 
 def show(path):
@@ -130,10 +123,9 @@ def edit_limits(path):
         del cfg["inbounds_limit"]["default"]
         save(path,cfg)
     print("Current inbound limits:", cfg["inbounds_limit"])
-    print(f"Fallback (used when inbound missing) = {cfg.get('fallback_limit')}")
-    print("Instructions: a) add/update inbound, d) delete inbound, f) set fallback, done to finish.")
+    print("Instructions: a) add/update inbound, d) delete inbound, done to finish.")
     while True:
-        k=prompt("Action (a/d/f/done)","done").strip().lower()
+        k=prompt("Action (a/d/done)","done").strip().lower()
         if k=="done": break
         if k=="a":
             name=prompt("Inbound name").strip()
@@ -151,12 +143,6 @@ def edit_limits(path):
                 del cfg["inbounds_limit"][name]; print(f"[ok] deleted {name}")
             else:
                 print("No such inbound")
-        elif k=="f":
-            try:
-                v=int(prompt("New fallback limit", str(cfg.get("fallback_limit",1))))
-            except ValueError:
-                print("Enter integer"); continue
-            cfg["fallback_limit"]=v; print(f"[ok] fallback_limit={v}")
         else:
             print("Bad choice")
     save(path,cfg)
@@ -226,25 +212,20 @@ def manage_nodes(path):
 def manage_limits(path):
     while True:
         cfg=load(path); ensure_defaults(cfg)
-        # Migrate legacy default on menu entry
-        if "default" in cfg["inbounds_limit"]:
-            cfg["fallback_limit"] = int(cfg["inbounds_limit"].pop("default"))
-            save(path,cfg)
-        print("\n=== Inbound Limits ===")
-        print(f"(fallback when inbound missing) -> {cfg.get('fallback_limit')}")
+        print("\n=== Inbound Limits (only these are enforced) ===")
         if not cfg["inbounds_limit"]:
             print("(none defined)")
         else:
             for k,v in cfg["inbounds_limit"].items():
                 print(f" - {k}: {v}")
-        print("a) Add/Update  d) Delete  f) Set fallback  b) Back")
+        print("a) Add/Update  d) Delete  b) Back")
         c=input("> ").strip().lower()
         if c=='b': break
         elif c=='a':
             name=prompt("Inbound name").strip()
             if not name: continue
             try:
-                v=int(prompt("Max concurrent IPs", str(cfg["inbounds_limit"].get(name,1))).strip())
+                v=int(prompt("Max concurrent IPs", str(cfg["inbounds_limit"].get(name,1))))
             except ValueError:
                 print("Enter integer"); continue
             cfg["inbounds_limit"][name]=v; save(path,cfg); print("[ok] saved")
@@ -254,14 +235,7 @@ def manage_limits(path):
                 cfg["inbounds_limit"].pop(name, None); save(path,cfg); print("[ok] deleted")
             else:
                 print("No such inbound")
-        elif c=='f':
-            try:
-                v=int(prompt("New fallback limit", str(cfg.get("fallback_limit",1))).strip())
-            except ValueError:
-                print("Enter integer"); continue
-            cfg["fallback_limit"]=v; save(path,cfg); print("[ok] fallback updated")
-        else:
-            print("Bad choice")
+        else: print("Bad choice")
 
 
 def manage_ports(path):
@@ -296,33 +270,22 @@ def manage_ports(path):
 def interactive_menu(path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     ensure_defaults(cfg:=load(path))
-    if "default" in cfg.get("inbounds_limit", {}):
-        if "fallback_limit" not in cfg:
-            cfg["fallback_limit"] = int(cfg["inbounds_limit"].get("default",1))
-        cfg["inbounds_limit"].pop("default", None)
     save(path,cfg)
     while True:
         cfg=load(path); ensure_defaults(cfg)
         print("\n=== m1m-guardian Config Menu ===")
-        print(f"(Fallback limit: {cfg.get('fallback_limit')})  Ports: {cfg.get('ports')}")
+        print(f"Ports: {cfg.get('ports')}  (Only defined inbounds are enforced)")
         print("1) Show config")
         print("2) Manage nodes")
         print("3) Manage inbound limits")
-        print("4) Set fallback limit")
-        print("5) Manage ports (conntrack flush mode)")
+        print("4) Manage ports (conntrack flush)")
         print("0) Exit")
         c=input("> ").strip()
         if c=='0': break
         elif c=='1': show(path)
         elif c=='2': manage_nodes(path)
         elif c=='3': manage_limits(path)
-        elif c=='4':
-            try:
-                v=int(prompt("New fallback limit", str(cfg.get("fallback_limit",1))))
-            except ValueError:
-                print("Enter integer"); continue
-            cfg["fallback_limit"]=v; save(path,cfg); print("[ok] fallback updated")
-        elif c=='5': manage_ports(path)
+        elif c=='4': manage_ports(path)
         else: print("Bad choice")
 
 def main():
