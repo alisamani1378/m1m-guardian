@@ -29,67 +29,44 @@ async def run_ssh(spec:NodeSpec, remote_cmd:str) -> int:
     return await proc.wait()
 
 async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
-    container = shlex.quote(spec.docker_container)
-    consecutive_fail=0
+    """Stream container logs using `docker logs -f` (more stable across restarts).
+    Auto-discovers container if configured one missing.
+    """
     while True:
-        start=time.time()
-        inner = r'''set -e
-SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
+        container = spec.docker_container
+        # Build remote shell that picks a target container
+        remote_script = r'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
 if ! command -v docker >/dev/null 2>&1; then echo "[guardian-stream] no_docker"; exit 41; fi
-if ! $SUDO docker inspect {container} >/dev/null 2>&1; then echo "[guardian-stream] no_container"; exit 42; fi
-if ! command -v pgrep >/dev/null 2>&1; then (apk add --no-cache procps >/dev/null 2>&1 || (apt-get update -y >/dev/null 2>&1 && apt-get install -y procps >/dev/null 2>&1) || (yum install -y procps-ng >/dev/null 2>&1) || true); fi
-pid=$($SUDO docker exec {container} pgrep -xo xray || $SUDO docker exec {container} ps -o pid,comm | awk '/[x]ray/{{print $1; exit}}')
-if [ -z "$pid" ]; then echo "[guardian-stream] no_xray_process"; exit 44; fi
-echo "[guardian-stream] attach pid=$pid container={container}"
-exec $SUDO docker exec -i {container} sh -lc "exec stdbuf -oL cat /proc/$pid/fd/1 /proc/$pid/fd/2 2>/dev/null"'''.format(container=container).strip()
-        remote = f"sh -lc {shlex.quote(inner)}"
-        cmd = _ssh_base(spec) + [remote]
-        log.debug("starting primary log stream: node=%s cmd=%s", spec.name, ' '.join(cmd))
+TARGET="{container}"
+if ! $SUDO docker inspect "$TARGET" >/dev/null 2>&1; then
+  # try autodiscover container containing xray string in its process list
+  for c in $($SUDO docker ps --format '{{{{.Names}}}}' 2>/dev/null); do
+    if $SUDO docker logs --tail=20 "$c" 2>/dev/null | grep -i 'accepted' >/dev/null 2>&1; then TARGET="$c"; break; fi
+  done
+fi
+if ! $SUDO docker inspect "$TARGET" >/dev/null 2>&1; then echo "[guardian-stream] no_container"; exit 42; fi
+echo "[guardian-stream] attach container=$TARGET"
+exec $SUDO docker logs -f --tail=0 "$TARGET" 2>&1
+'''.format(container=shlex.quote(container)).strip()
+        cmd = _ssh_base(spec) + ["sh","-lc", remote_script]
+        log.debug("starting docker logs follow: node=%s cmd=%s", spec.name, ' '.join(cmd))
         proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-        premature=False
+        start=time.time()
         try:
             assert proc.stdout is not None
-            async for line in _iter_stream(proc, spec):
-                yield line
+            while True:
+                line = await proc.stdout.readline()
+                if not line: break
+                text=line.decode('utf-8','ignore').rstrip('\n')
+                if text.startswith('[guardian-stream]'):
+                    log.info("node=%s %s", spec.name, text.replace('[guardian-stream] ','').strip())
+                else:
+                    log.debug("node=%s raw-log: %s", spec.name, text)
+                yield text
         finally:
             rc=getattr(proc,'returncode',None)
-            duration=time.time()-start
-            premature = duration < 8  # ended too quickly
-            if premature or rc in (41,42,44):
-                consecutive_fail+=1
-            else:
-                consecutive_fail=0
-            log.debug("primary stream ended node=%s rc=%s duration=%.1fs fail_count=%d", spec.name, rc, duration, consecutive_fail)
             with contextlib.suppress(Exception):
                 proc.kill(); await proc.wait()
-        # Decide fallback
-        if consecutive_fail>=3:
-            log.warning("node=%s switching to docker logs fallback", spec.name)
-            fallback = f"sh -lc {shlex.quote(f'SUDO=; if [ \"$(id -u)\" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO=\"sudo\"; fi; fi; $SUDO docker logs -f --tail=50 {container}')}"
-            fcmd=_ssh_base(spec)+[fallback]
-            fproc=await asyncio.create_subprocess_exec(*fcmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-            try:
-                assert fproc.stdout is not None
-                while True:
-                    line=await fproc.stdout.readline()
-                    if not line: break
-                    text=line.decode('utf-8','ignore').rstrip('\n')
-                    yield text
-            finally:
-                with contextlib.suppress(Exception):
-                    fproc.kill(); await fproc.wait()
-            consecutive_fail=0
-        # small delay before retry primary
-        await asyncio.sleep(2)
-
-async def _iter_stream(proc, spec:NodeSpec):
-    assert proc.stdout is not None
-    while True:
-        line = await proc.stdout.readline()
-        if not line: break
-        text=line.decode("utf-8","ignore").rstrip("\n")
-        if text.startswith("[guardian-stream]"):
-            log.info("node=%s %s", spec.name, text.replace('[guardian-stream] ','').strip())
-        else:
-            log.debug("node=%s raw-log: %s", spec.name, text)
-        yield text
+            log.warning("log stream ended node=%s rc=%s uptime=%.1fs (restarting in 3s)", spec.name, rc, time.time()-start)
+            yield f"[guardian-stream-exit rc={rc}]"
+            await asyncio.sleep(3)
