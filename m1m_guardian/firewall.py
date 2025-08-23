@@ -20,7 +20,13 @@ SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then S
 IPT=$(command -v iptables-legacy || command -v iptables || true)
 [ -z "$IPT" ] && exit 0
 $SUDO ipset create {SET_NAME} hash:ip timeout 0 -exist
+# Ensure rule in INPUT & FORWARD
 $IPT -C INPUT -m set --match-set {SET_NAME} src -j DROP 2>/dev/null || $SUDO $IPT -I INPUT 1 -m set --match-set {SET_NAME} src -j DROP
+$IPT -C FORWARD -m set --match-set {SET_NAME} src -j DROP 2>/dev/null || $SUDO $IPT -I FORWARD 1 -m set --match-set {SET_NAME} src -j DROP
+# If DOCKER-USER chain exists add there (preferred for container traffic)
+if $IPT -S DOCKER-USER >/dev/null 2>&1; then
+  $IPT -C DOCKER-USER -m set --match-set {SET_NAME} src -j DROP 2>/dev/null || $SUDO $IPT -I DOCKER-USER 1 -m set --match-set {SET_NAME} src -j DROP
+fi
 true
 '''.strip()
     cmd = _ssh_base(spec) + [inner]
