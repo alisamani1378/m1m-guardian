@@ -36,7 +36,8 @@ SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then S
 (command -v ipset >/dev/null 2>&1) || true
 IPT=$(command -v iptables-legacy || command -v iptables || true)
 [ -z "$IPT" ] && exit 0
-$SUDO ipset add {SET_NAME} {shlex.quote(ip)} timeout {int(seconds)} -exist
+# Try add; if set missing recreate then retry once
+$SUDO ipset add {SET_NAME} {shlex.quote(ip)} timeout {int(seconds)} -exist 2>/dev/null || {{ $SUDO ipset create {SET_NAME} hash:ip timeout 0 -exist 2>/dev/null || true; $SUDO ipset add {SET_NAME} {shlex.quote(ip)} timeout {int(seconds)} -exist || true; }}
 {conntrack_block}
 true'''
     cmd = _ssh_base(spec) + [inner]
