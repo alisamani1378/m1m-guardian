@@ -29,25 +29,30 @@ async def run_ssh(spec:NodeSpec, remote_cmd:str) -> int:
     return await proc.wait()
 
 async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
-    """Stream xray stdout/stderr via /proc/$pid/fd inside container with auto reattach."""
+    """Stream xray stdout/stderr via /proc/$pid/fd inside container with auto reattach.
+    Uses only busybox-compatible commands (pgrep optional) to avoid rc=2 failures.
+    """
     while True:
         container = shlex.quote(spec.docker_container)
+        # Host-side script builds a stable inner loop inside the container.
         remote_script = (
             "SUDO=\"\"; if [ \"$(id -u)\" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO=\"sudo\"; fi; fi\n"
             "if ! command -v docker >/dev/null 2>&1; then echo '[guardian-stream] no_docker'; exit 41; fi\n"
             f"TARGET={container}\n"
             "if ! $SUDO docker inspect \"$TARGET\" >/dev/null 2>&1; then\n"
             "  for c in $($SUDO docker ps --format '{{.Names}}' 2>/dev/null); do\n"
-            "    if $SUDO docker exec \"$c\" sh -lc 'pgrep -xo xray >/dev/null 2>&1 || ps -o comm | grep -i xray >/dev/null 2>&1'; then TARGET=\"$c\"; break; fi\n"
+            "    if $SUDO docker exec \"$c\" sh -lc 'command -v pgrep >/dev/null 2>&1 && pgrep -xo xray >/dev/null 2>&1 || ps | grep -i \\bxray\\b | grep -v grep >/dev/null 2>&1'; then TARGET=\"$c\"; break; fi\n"
             "  done\n"
             "fi\n"
             "if ! $SUDO docker inspect \"$TARGET\" >/dev/null 2>&1; then echo '[guardian-stream] no_container'; exit 42; fi\n"
             "echo '[guardian-stream] attach container='$TARGET\n"
-            "exec $SUDO docker exec -i \"$TARGET\" sh -lc 'while true; do "
-            "pid=$(pgrep -xo xray || ps -eo pid,comm | awk '/[x]ray/{print $1; exit}'); "
+            # Inner loop: find pid (pgrep else grep), then cat fds, re-loop on exit
+            "exec $SUDO docker exec -i \"$TARGET\" sh -c 'while true; do "
+            "if command -v pgrep >/dev/null 2>&1; then pid=$(pgrep -xo xray); else pid=$(ps | grep -i \\bxray\\b | grep -v grep | awk \"{print $1; exit}\"); fi; "
             "if [ -z \"$pid\" ]; then echo \"[guardian-stream] no_xray_process\"; sleep 2; continue; fi; "
+            "[ -r /proc/$pid/fd/1 ] || { echo \"[guardian-stream] fd_unreadable pid=$pid\"; sleep 2; continue; }; "
             "echo \"[guardian-stream] follow pid=$pid\"; "
-            "stdbuf -oL cat /proc/$pid/fd/1 /proc/$pid/fd/2 2>/dev/null || true; "
+            "cat /proc/$pid/fd/1 /proc/$pid/fd/2 2>/dev/null || true; "
             "sleep 1; done'"
         )
         cmd = _ssh_base(spec) + ["sh","-lc", remote_script]
@@ -69,6 +74,6 @@ async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
             rc=getattr(proc,'returncode',None)
             with contextlib.suppress(Exception):
                 proc.kill(); await proc.wait()
-            log.warning("log stream wrapper ended node=%s rc=%s uptime=%.1fs (restarting in 3s)", spec.name, rc, time.time()-start)
+            log.warning("log stream wrapper ended node=%s rc=%s uptime=%.1fs (restarting in 4s)", spec.name, rc, time.time()-start)
             yield f"[guardian-stream-exit rc={rc}]"
-            await asyncio.sleep(3)
+            await asyncio.sleep(4)

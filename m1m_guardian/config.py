@@ -12,6 +12,7 @@ def ensure_defaults(cfg:dict):
     cfg.setdefault("redis", {"url":"redis://127.0.0.1:6379/0"})
     cfg.setdefault("ban_minutes", 10)
     cfg.setdefault("cross_node_ban", True)
+    cfg.setdefault("rejected_threshold", 8)  # new: how many rejected/invalid before ban
     if "ports" not in cfg or cfg["ports"] in (None, ""):
         cfg["ports"] = []  # empty list means no conntrack flush
     if isinstance(cfg.get("ports"), int):
@@ -274,7 +275,7 @@ def interactive_menu(path):
     while True:
         cfg=load(path); ensure_defaults(cfg)
         print("\n=== m1m-guardian Config Menu ===")
-        print(f"Ports: {cfg.get('ports')}  (Only defined inbounds are enforced)")
+        print(f"Ports: {cfg.get('ports')}  (Only defined inbounds are enforced)  rejected_threshold={cfg.get('rejected_threshold')}")
         print("1) Show config")
         print("2) Manage nodes")
         print("3) Manage inbound limits")
