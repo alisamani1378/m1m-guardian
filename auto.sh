@@ -44,7 +44,9 @@ make_venv() {
   python3 -m venv "$VENV"
   "$VENV/bin/pip" install --upgrade pip
   "$VENV/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
+  "$VENV/bin/pip" install -e "$INSTALL_DIR"
 }
+
 
 install_service() {
   cp "$INSTALL_DIR/m1m-guardian.service" "$SERVICE"
