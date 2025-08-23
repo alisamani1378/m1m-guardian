@@ -8,7 +8,8 @@ Type=simple
 User=root
 WorkingDirectory=/opt/m1m-guardian
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/m1m-guardian/.venv/bin/python -m m1m_guardian.main --config /etc/m1m-guardian/config.yaml
+Environment=PYTHONPATH=/opt/m1m-guardian
+ExecStart=/opt/m1m-guardian/.venv/bin/python -m m1m_guardian.agent --config /etc/m1m-guardian/config.yaml
 Restart=always
 RestartSec=3
 StandardOutput=journal
