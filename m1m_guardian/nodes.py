@@ -31,12 +31,13 @@ async def run_ssh(spec:NodeSpec, remote_cmd:str) -> int:
 async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
     container = shlex.quote(spec.docker_container)
     inner = r'''set -e
+SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
 if ! command -v docker >/dev/null 2>&1; then echo "[guardian-stream] no_docker"; exit 41; fi
 # Check container; if missing try auto-discover one containing xray
-if ! docker inspect {container} >/dev/null 2>&1; then
-  found=""; amb=""; cands=$(docker ps --format '{{{{.Names}}}}' 2>/dev/null || true)
+if ! $SUDO docker inspect {container} >/dev/null 2>&1; then
+  found=""; amb=""; cands=$($SUDO docker ps --format '{{{{.Names}}}}' 2>/dev/null || true)
   for c in $cands; do
-    if docker exec "$c" pgrep -xo xray >/dev/null 2>&1; then
+    if $SUDO docker exec "$c" pgrep -xo xray >/dev/null 2>&1; then
       if [ -z "$found" ]; then found="$c"; else amb="1"; fi
     fi
   done
@@ -50,10 +51,10 @@ else
   target={container}
 fi
 if ! command -v pgrep >/dev/null 2>&1; then (apk add --no-cache procps >/dev/null 2>&1 || (apt-get update -y >/dev/null 2>&1 && apt-get install -y procps >/dev/null 2>&1) || (yum install -y procps-ng >/dev/null 2>&1) || true); fi
-pid=$(docker exec "$target" pgrep -xo xray || docker exec "$target" ps -o pid,comm | awk '/[x]ray/{{print $1; exit}}')
+pid=$($SUDO docker exec "$target" pgrep -xo xray || $SUDO docker exec "$target" ps -o pid,comm | awk '/[x]ray/{{print $1; exit}}')
 if [ -z "$pid" ]; then echo "[guardian-stream] no_xray_process"; exit 44; fi
 echo "[guardian-stream] attach pid=$pid container=$target"
-exec docker exec -i "$target" sh -lc "exec stdbuf -oL cat /proc/$pid/fd/1 /proc/$pid/fd/2 2>/dev/null"
+exec $SUDO docker exec -i "$target" sh -lc "exec stdbuf -oL cat /proc/$pid/fd/1 /proc/$pid/fd/2 2>/dev/null"
 '''.format(container=container).strip()
 
     remote = f"sh -lc {shlex.quote(inner)}"
