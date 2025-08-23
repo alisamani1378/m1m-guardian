@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "m1m-guardian"
+version = "0.1.0"
+description = "Xray multi-IP guardian: monitors nodes and bans over-limit IPs across inbounds"
+readme = "README.md"
+authors = [ { name = "Unknown" } ]
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+  "redis>=5.0",
+  "PyYAML>=6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/alisamani1378/m1m-guardian"
+
+[project.scripts]
+m1m-guardian = "m1m_guardian.main:main"
+m1m-guardian-config = "m1m_guardian.config:main"
+

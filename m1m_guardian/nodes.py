@@ -1,5 +1,6 @@
 import asyncio, shlex
-from typing import Optional, List, AsyncIterator, Dict
+import contextlib
+from typing import List, AsyncIterator
 
 class NodeSpec:
     def __init__(self, name, host, ssh_user, ssh_port, docker_container, ssh_key=None, ssh_pass=None):
