@@ -28,17 +28,18 @@ async def amain(config_path:str):
     store = Store(cfg["redis"]["url"])
     nodes = make_nodes(cfg)
     limits = cfg["inbounds_limit"]
+    fallback = int(cfg.get("fallback_limit", 1))
     ban_minutes = int(cfg.get("ban_minutes",10))
     ports = list(cfg.get("ports",[8080,5540,2222]))
     cross = bool(cfg.get("cross_node_ban", True))
 
     if not nodes:
-        logging.error("No nodes configured. Use auto.sh -> Add node.")
+        logging.error("No nodes configured. Use auto.sh -> option 2 (Config menu) to add a node.")
         return
 
     watchers=[]
     for spec in nodes:
-        watchers.append(NodeWatcher(spec, store, limits, ban_minutes, ports, nodes, cross).run())
+        watchers.append(NodeWatcher(spec, store, limits, ban_minutes, ports, nodes, cross, fallback).run())
 
     logging.info("Starting %d node watchers...", len(watchers))
     await asyncio.gather(*watchers)

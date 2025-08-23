@@ -10,11 +10,12 @@ cross_node_ban: true
 # پورت‌هایی که معمولاً Xray گوش می‌دهد (برای conntrack delete)
 ports: [8080, 5540, 2222]
 
-# محدودیت هم‌زمانی برای هر inbound
+# حد پیش‌فرض (fallback) وقتی inbound در لیست تعریف نشده
+fallback_limit: 1
+
+# محدودیت هم‌زمانی برای inbound های خاص (می‌تواند خالی باشد)
 inbounds_limit:
-  default: 1
-  VIP: 1
-  limit: 2
+
 
 nodes:
   # نمونه—با منو اضافه می‌شود

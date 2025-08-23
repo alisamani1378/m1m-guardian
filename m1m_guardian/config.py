@@ -1,4 +1,4 @@
-import argparse, os, yaml
+import argparse, os, yaml, sys
 
 def load(path:str)->dict:
     with open(path, "r", encoding="utf-8") as f:
@@ -12,8 +12,20 @@ def ensure_defaults(cfg:dict):
     cfg.setdefault("redis", {"url":"redis://127.0.0.1:6379/0"})
     cfg.setdefault("ban_minutes", 10)
     cfg.setdefault("cross_node_ban", True)
-    cfg.setdefault("ports", [8080,5540,2222])
-    cfg.setdefault("inbounds_limit", {"default":1})
+    # Ports semantics: ['*'] => flush all; [] => disable; list[int] => specific
+    if "ports" not in cfg or cfg["ports"] in (None, "", "*"):
+        cfg["ports"] = ["*"]
+    # normalize scalar port to list
+    if isinstance(cfg.get("ports"), int):
+        cfg["ports"] = [cfg["ports"]]
+    cfg.setdefault("inbounds_limit", {})
+    if "fallback_limit" not in cfg:
+        legacy_default = None
+        if isinstance(cfg.get("inbounds_limit"), dict) and "default" in cfg["inbounds_limit"]:
+            legacy_default = cfg["inbounds_limit"].get("default")
+        cfg["fallback_limit"] = int(legacy_default if legacy_default is not None else 1)
+    if not isinstance(cfg.get("nodes"), list):
+        cfg["nodes"] = []
     cfg.setdefault("nodes", [])
 
 def show(path):
@@ -25,6 +37,44 @@ def prompt(inp:str, default=None):
     s=input(f"{inp}{f' [{default}]' if default is not None else ''}: ").strip()
     return s or (default if default is not None else "")
 
+def _safe_filename(name:str)->str:
+    import re
+    return re.sub(r"[^A-Za-z0-9_.-]","_", name)[:60] or "node"
+
+def _read_multiline_key()->str:
+    print("Paste private key (ends automatically after a line containing 'END PRIVATE KEY'). Ctrl+D (Linux) or Ctrl+Z Enter (Windows) to finish if needed.")
+    lines=[]
+    while True:
+        try:
+            line=sys.stdin.readline()
+        except KeyboardInterrupt:
+            print("\n[cancelled]"); return ""
+        if not line: # EOF
+            break
+        lines.append(line.rstrip("\n"))
+        if "END" in line and "PRIVATE KEY" in line:
+            break
+        # safety cap
+        if len(lines) > 500:
+            print("[warn] key too large, stopping read."); break
+    key="\n".join(lines).strip()
+    if not key:
+        print("[warn] empty key input.")
+    return key
+
+def _store_key_content(base_dir:str, node_name:str, key_content:str)->str:
+    os.makedirs(os.path.join(base_dir, "keys"), exist_ok=True)
+    fname=_safe_filename(node_name)+".key"
+    path=os.path.join(base_dir, "keys", fname)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(key_content+("\n" if not key_content.endswith("\n") else ""))
+    try:
+        os.chmod(path, 0o600)
+    except Exception:
+        pass
+    print(f"[ok] stored key at {path} (chmod 600)")
+    return path
+
 def add_node(path):
     cfg=load(path); ensure_defaults(cfg)
     node={
@@ -34,11 +84,26 @@ def add_node(path):
         "ssh_port": int(prompt("SSH port", "22")),
         "docker_container": prompt("Docker container name", "marzban-node")
     }
-    mode=prompt("Auth mode (key/pass)", "key")
-    if mode.lower().startswith("k"):
-        node["ssh_key"]=prompt("Path to private key", "/root/.ssh/id_rsa")
-    else:
-        node["ssh_pass"]=prompt("SSH password")
+    # Auth selection menu
+    while True:
+        print("Auth method: 1) Key path  2) Paste key  3) Password")
+        choice=prompt("Select (1/2/3)", "1").strip()
+        if choice == '1':
+            node["ssh_key"]=prompt("Path to private key", "/root/.ssh/id_rsa")
+            break
+        elif choice == '2':
+            key_content=_read_multiline_key()
+            if key_content:
+                key_path=_store_key_content(os.path.dirname(path) or "/etc/m1m-guardian", node["name"], key_content)
+                node["ssh_key"]=key_path
+                break
+            else:
+                print("Empty key, try again.")
+        elif choice == '3':
+            node["ssh_pass"]=prompt("SSH password")
+            break
+        else:
+            print("Bad choice")
     cfg["nodes"].append(node)
     save(path,cfg)
     print(f"[ok] added: {node['name']}")
@@ -59,29 +124,41 @@ def remove_node(path):
 
 def edit_limits(path):
     cfg=load(path); ensure_defaults(cfg)
+    # Auto-migrate legacy default each call
+    if "default" in cfg["inbounds_limit"]:
+        cfg["fallback_limit"] = int(cfg["inbounds_limit"]["default"]) if "fallback_limit" not in cfg else cfg["fallback_limit"]
+        del cfg["inbounds_limit"]["default"]
+        save(path,cfg)
     print("Current inbound limits:", cfg["inbounds_limit"])
-    print("Instructions: enter inbound name to set/update limit; prefix with '-' to delete (except 'default'); enter 'done' to finish.")
+    print(f"Fallback (used when inbound missing) = {cfg.get('fallback_limit')}")
+    print("Instructions: a) add/update inbound, d) delete inbound, f) set fallback, done to finish.")
     while True:
-        k=prompt("Inbound name (or 'done' to finish)","done").strip()
-        if k.lower()=="done": break
-        if not k: continue
-        if k.startswith('-'):
-            target=k[1:].strip()
-            if target=="default":
-                print("Cannot delete 'default'.")
-            elif target in cfg["inbounds_limit"]:
-                del cfg["inbounds_limit"][target]
-                print(f"[ok] deleted inbound limit '{target}'")
+        k=prompt("Action (a/d/f/done)","done").strip().lower()
+        if k=="done": break
+        if k=="a":
+            name=prompt("Inbound name").strip()
+            if not name: continue
+            try:
+                v=int(prompt(f"Max concurrent IPs for '{name}'", str(cfg["inbounds_limit"].get(name,1))))
+            except ValueError:
+                print("Enter integer"); continue
+            cfg["inbounds_limit"][name]=v
+            print(f"[ok] set {name}={v}")
+        elif k=="d":
+            name=prompt("Inbound to delete").strip()
+            if not name: continue
+            if name in cfg["inbounds_limit"]:
+                del cfg["inbounds_limit"][name]; print(f"[ok] deleted {name}")
             else:
-                print(f"No such inbound '{target}'")
-            continue
-        try:
-            v_input=prompt(f"Max concurrent IPs for '{k}'", "1").strip()
-            v=int(v_input)
-        except ValueError:
-            print("Enter an integer."); continue
-        cfg["inbounds_limit"][k]=v
-        print(f"[ok] set {k}={v}")
+                print("No such inbound")
+        elif k=="f":
+            try:
+                v=int(prompt("New fallback limit", str(cfg.get("fallback_limit",1))))
+            except ValueError:
+                print("Enter integer"); continue
+            cfg["fallback_limit"]=v; print(f"[ok] fallback_limit={v}")
+        else:
+            print("Bad choice")
     save(path,cfg)
     print("[ok] saved limits")
 
@@ -110,20 +187,20 @@ def edit_node(path):
     upd("ssh_user","SSH user")
     upd("ssh_port","SSH port", int)
     upd("docker_container","Docker container")
-    if "ssh_key" in node or ("ssh_pass" not in node):
-        k=prompt("SSH key path (leave blank to keep / type 'pass' to switch to password)", node.get("ssh_key",""))
-        if k=="pass":
-            node.pop("ssh_key", None)
-            node["ssh_pass"]=prompt("SSH password")
-        elif k:
-            node["ssh_key"]=k; node.pop("ssh_pass", None)
-    else:
-        k=prompt("SSH password (leave blank to keep / type 'key' to switch to key)", "***")
-        if k=="key":
-            node.pop("ssh_pass", None)
-            node["ssh_key"]=prompt("SSH key path","/root/.ssh/id_rsa")
-        elif k and k!="***":
-            node["ssh_pass"]=k
+    print("Change auth? 1) keep  2) key path  3) paste key  4) password")
+    choice=prompt("Select", "1")
+    if choice=='2':
+        node.pop("ssh_pass", None)
+        node["ssh_key"]=prompt("Path to private key", node.get("ssh_key","/root/.ssh/id_rsa"))
+    elif choice=='3':
+        node.pop("ssh_pass", None)
+        key_content=_read_multiline_key()
+        if key_content:
+            key_path=_store_key_content(os.path.dirname(path) or "/etc/m1m-guardian", node["name"], key_content)
+            node["ssh_key"]=key_path
+    elif choice=='4':
+        node.pop("ssh_key", None)
+        node["ssh_pass"]=prompt("SSH password")
     save(path,cfg); print("[ok] node updated")
 
 
@@ -149,23 +226,69 @@ def manage_nodes(path):
 def manage_limits(path):
     while True:
         cfg=load(path); ensure_defaults(cfg)
+        # Migrate legacy default on menu entry
+        if "default" in cfg["inbounds_limit"]:
+            cfg["fallback_limit"] = int(cfg["inbounds_limit"].pop("default"))
+            save(path,cfg)
         print("\n=== Inbound Limits ===")
-        for k,v in cfg["inbounds_limit"].items():
-            print(f" - {k}: {v}")
-        print("a) Add/Update  d) Delete  b) Back")
+        print(f"(fallback when inbound missing) -> {cfg.get('fallback_limit')}")
+        if not cfg["inbounds_limit"]:
+            print("(none defined)")
+        else:
+            for k,v in cfg["inbounds_limit"].items():
+                print(f" - {k}: {v}")
+        print("a) Add/Update  d) Delete  f) Set fallback  b) Back")
         c=input("> ").strip().lower()
         if c=='b': break
         elif c=='a':
-            name=prompt("Inbound name (default if blank)", "default").strip() or "default"
+            name=prompt("Inbound name").strip()
+            if not name: continue
             try:
                 v=int(prompt("Max concurrent IPs", str(cfg["inbounds_limit"].get(name,1))).strip())
             except ValueError:
                 print("Enter integer"); continue
             cfg["inbounds_limit"][name]=v; save(path,cfg); print("[ok] saved")
         elif c=='d':
-            name=prompt("Inbound to delete (cannot delete default)").strip()
-            if name=='default': print("Cannot delete default"); continue
-            cfg["inbounds_limit"].pop(name, None); save(path,cfg); print("[ok] deleted (if existed)")
+            name=prompt("Inbound to delete").strip()
+            if name in cfg["inbounds_limit"]:
+                cfg["inbounds_limit"].pop(name, None); save(path,cfg); print("[ok] deleted")
+            else:
+                print("No such inbound")
+        elif c=='f':
+            try:
+                v=int(prompt("New fallback limit", str(cfg.get("fallback_limit",1))).strip())
+            except ValueError:
+                print("Enter integer"); continue
+            cfg["fallback_limit"]=v; save(path,cfg); print("[ok] fallback updated")
+        else:
+            print("Bad choice")
+
+
+def manage_ports(path):
+    while True:
+        cfg=load(path); ensure_defaults(cfg)
+        cur=cfg.get("ports", [])
+        print("\n=== Conntrack Flush Ports ===")
+        print("Current:", cur)
+        print("Modes: 1) Flush ALL ('*')  2) Custom list  3) Disable flush  b) Back")
+        c=input("> ").strip().lower()
+        if c=='b': break
+        elif c=='1':
+            cfg['ports']=["*"]
+            save(path,cfg); print("[ok] set to all ports (*).")
+        elif c=='2':
+            raw=prompt("Enter ports (comma/space separated)").replace(',', ' ')
+            ports=[]
+            for token in raw.split():
+                if token.isdigit():
+                    p=int(token)
+                    if 1<=p<=65535: ports.append(p)
+            if not ports:
+                print("No valid ports parsed.")
+            else:
+                cfg['ports']=ports; save(path,cfg); print(f"[ok] set ports={ports}")
+        elif c=='3':
+            cfg['ports']=[]; save(path,cfg); print("[ok] disabled conntrack flush (existing connections linger).")
         else:
             print("Bad choice")
 
@@ -173,19 +296,33 @@ def manage_limits(path):
 def interactive_menu(path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     ensure_defaults(cfg:=load(path))
+    if "default" in cfg.get("inbounds_limit", {}):
+        if "fallback_limit" not in cfg:
+            cfg["fallback_limit"] = int(cfg["inbounds_limit"].get("default",1))
+        cfg["inbounds_limit"].pop("default", None)
     save(path,cfg)
     while True:
         cfg=load(path); ensure_defaults(cfg)
         print("\n=== m1m-guardian Config Menu ===")
+        print(f"(Fallback limit: {cfg.get('fallback_limit')})  Ports: {cfg.get('ports')}")
         print("1) Show config")
         print("2) Manage nodes")
         print("3) Manage inbound limits")
+        print("4) Set fallback limit")
+        print("5) Manage ports (conntrack flush mode)")
         print("0) Exit")
         c=input("> ").strip()
         if c=='0': break
         elif c=='1': show(path)
         elif c=='2': manage_nodes(path)
         elif c=='3': manage_limits(path)
+        elif c=='4':
+            try:
+                v=int(prompt("New fallback limit", str(cfg.get("fallback_limit",1))))
+            except ValueError:
+                print("Enter integer"); continue
+            cfg["fallback_limit"]=v; save(path,cfg); print("[ok] fallback updated")
+        elif c=='5': manage_ports(path)
         else: print("Bad choice")
 
 def main():

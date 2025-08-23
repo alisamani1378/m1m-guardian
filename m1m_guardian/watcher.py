@@ -6,13 +6,13 @@ from .firewall import ensure_rule, ban_ip
 log = logging.getLogger("guardian.watcher")
 
 class NodeWatcher:
-    def __init__(self, spec:NodeSpec, store, limits:dict, ban_minutes:int, ports:list[int], all_nodes:list[NodeSpec], cross_node_ban:bool):
+    def __init__(self, spec:NodeSpec, store, limits:dict, ban_minutes:int, ports:list[int], all_nodes:list[NodeSpec], cross_node_ban:bool, fallback_limit:int):
         self.spec=spec; self.store=store; self.limits=limits; self.ban_minutes=ban_minutes
-        self.ports=ports; self.all_nodes=all_nodes; self.cross=cross_node_ban
+        self.ports=ports; self.all_nodes=all_nodes; self.cross=cross_node_ban; self.fallback=fallback_limit
         self._ensured=False
 
     def limit_for(self, inbound:str)->int:
-        return self.limits.get(inbound, self.limits.get("default",1))
+        return int(self.limits.get(inbound, self.fallback))
 
     async def run(self):
         if not self._ensured:

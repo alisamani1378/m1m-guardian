@@ -8,9 +8,13 @@ def _cmd_ensure_ports(ports):
     parts=[]
     parts.append('if command -v conntrack >/dev/null 2>&1; then')
     parts.append('IP="$1"; shift || true')
-    for p in ports:
-        parts.append(f'conntrack -D -p tcp --dport {p} --src "$IP" >/dev/null 2>&1 || true')
-        parts.append(f'conntrack -D -p udp --dport {p} --src "$IP" >/dev/null 2>&1 || true')
+    if ports and any(str(p).strip()=='*' for p in ports):
+        # Wildcard: حذف همه کانکشن‌ها (همه پروت‌ها/پورت‌ها) برای IP
+        parts.append('conntrack -D -s "$IP" >/dev/null 2>&1 || true')
+    else:
+        for p in ports:
+            parts.append(f'conntrack -D -p tcp --dport {p} --src "$IP" >/dev/null 2>&1 || true')
+            parts.append(f'conntrack -D -p udp --dport {p} --src "$IP" >/dev/null 2>&1 || true')
     parts.append('fi')
     return " ; ".join(parts)
 
