@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/YOUR_USER/m1m-guardian}" # ← اینو بعداً عوض کن
+REPO_URL="${REPO_URL:-https://github.com/alisamani1378/m1m-guardian}"
 INSTALL_DIR="/opt/m1m-guardian"
 ETC_DIR="/etc/m1m-guardian"
 CFG="$ETC_DIR/config.yaml"
@@ -24,12 +24,21 @@ pkg_install() {
 
 clone_or_update() {
   mkdir -p "$INSTALL_DIR" "$ETC_DIR"
-  if [ -d "$INSTALL_DIR/.git" ]; then
-    git -C "$INSTALL_DIR" pull --ff-only
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+
+    CLONE_URL="${REPO_URL/https:\/\/github.com\//https:\/\/${GITHUB_TOKEN}@github.com/}.git"
   else
-    git clone "$REPO_URL" "$INSTALL_DIR"
+    CLONE_URL="${REPO_URL}.git"
+  fi
+
+  if [ -d "$INSTALL_DIR/.git" ]; then
+    git -C "$INSTALL_DIR" fetch --depth=1 origin main || git -C "$INSTALL_DIR" fetch --depth=1 origin master || true
+    git -C "$INSTALL_DIR" reset --hard "$(git -C "$INSTALL_DIR" rev-parse --verify origin/main 2>/dev/null || git -C "$INSTALL_DIR" rev-parse --verify origin/master)"
+  else
+    git clone --depth=1 "$CLONE_URL" "$INSTALL_DIR"
   fi
 }
+
 
 make_venv() {
   python3 -m venv "$VENV"
