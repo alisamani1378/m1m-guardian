@@ -20,12 +20,13 @@ def _cmd_ensure_ports(ports):
 
 async def ensure_rule(spec:NodeSpec):
     inner = f'''
+SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
 # ensure ipset installed
-(command -v ipset >/dev/null 2>&1) || (apt-get update -y >/dev/null 2>&1 && apt-get install -y ipset >/dev/null 2>&1) || (apk add --no-cache ipset >/dev/null 2>&1) || (yum install -y ipset >/dev/null 2>&1) || true
+(command -v ipset >/dev/null 2>&1) || ( $SUDO apt-get update -y >/dev/null 2>&1 && $SUDO apt-get install -y ipset >/dev/null 2>&1 ) || ( $SUDO apk add --no-cache ipset >/dev/null 2>&1 ) || ( $SUDO yum install -y ipset >/dev/null 2>&1 ) || true
 IPT=$(command -v iptables-legacy || command -v iptables)
 [ -n "$IPT" ] || exit 0
-ipset list {SET_NAME} >/dev/null 2>&1 || ipset create {SET_NAME} hash:ip timeout 0
-$IPT -C INPUT -m set --match-set {SET_NAME} src -j DROP 2>/dev/null || $IPT -I INPUT 1 -m set --match-set {SET_NAME} src -j DROP
+ipset list {SET_NAME} >/dev/null 2>&1 || $SUDO ipset create {SET_NAME} hash:ip timeout 0
+$IPT -C INPUT -m set --match-set {SET_NAME} src -j DROP 2>/dev/null || $SUDO $IPT -I INPUT 1 -m set --match-set {SET_NAME} src -j DROP
 true
 '''.strip()
     cmd = _ssh_base(spec) + [inner]
@@ -34,11 +35,11 @@ true
 
 async def ban_ip(spec:NodeSpec, ip:str, seconds:int, ports:list[int]):
     inner = f'''
-# ensure ipset installed (race-safe)
+SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
 (command -v ipset >/dev/null 2>&1) || true
 IPT=$(command -v iptables-legacy || command -v iptables)
 [ -n "$IPT" ] || exit 0
-ipset add {SET_NAME} {shlex.quote(ip)} timeout {int(seconds)} -exist
+$SUDO ipset add {SET_NAME} {shlex.quote(ip)} timeout {int(seconds)} -exist
 {_cmd_ensure_ports(ports)} {shlex.quote(ip)}
 true
 '''.strip()

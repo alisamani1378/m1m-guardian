@@ -1,6 +1,9 @@
 import asyncio, shlex
 import contextlib
 from typing import List, AsyncIterator
+import logging
+
+log = logging.getLogger("guardian.nodes")
 
 class NodeSpec:
     def __init__(self, name, host, ssh_user, ssh_port, docker_container, ssh_key=None, ssh_pass=None):
@@ -28,20 +31,34 @@ async def run_ssh(spec:NodeSpec, remote_cmd:str) -> int:
 async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
     # داخل کانتینر، لاگ استریم stdout/err:
     inner = r'''
-apk add --no-cache procps >/dev/null 2>&1 || (apt-get update -y >/dev/null 2>&1 && apt-get install -y procps >/dev/null 2>&1) || true
-pid=$(pgrep -xo xray || ps -o pid,comm | awk "/[x]ray/{print $1; exit}")
+if ! command -v pgrep >/dev/null 2>&1; then
+  (apk add --no-cache procps >/dev/null 2>&1 || (apt-get update -y >/dev/null 2>&1 && apt-get install -y procps >/dev/null 2>&1) || (yum install -y procps-ng >/dev/null 2>&1) || true)
+fi
+pid=$(pgrep -xo xray || ps -o pid,comm | awk '/[x]ray/{print $1; exit}')
+if [ -z "$pid" ]; then
+  echo "[guardian-stream] no_xray_process"
+  exit 44
+fi
+echo "[guardian-stream] attach pid=$pid"
 exec stdbuf -oL cat /proc/$pid/fd/1 /proc/$pid/fd/2 2>/dev/null
 '''.strip()
 
     remote = f"docker exec -i {shlex.quote(spec.docker_container)} sh -lc {shlex.quote(inner)}"
     cmd = _ssh_base(spec) + [remote]
+    log.debug("starting remote log stream: node=%s cmd=%s", spec.name, ' '.join(cmd))
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     try:
         assert proc.stdout is not None
         while True:
             line = await proc.stdout.readline()
             if not line: break
+            text=line.decode("utf-8","ignore").rstrip("\n")
+            if text.startswith("[guardian-stream]"):
+                log.info("node=%s %s", spec.name, text.replace('[guardian-stream] ','').strip())
+            else:
+                log.debug("node=%s raw-log: %s", spec.name, text)
             yield line.decode("utf-8","ignore").rstrip("\n")
     finally:
         with contextlib.suppress(ProcessLookupError, AttributeError):
             proc.kill(); await proc.wait()
+        log.debug("remote log stream ended: node=%s rc=%s", spec.name, getattr(proc,'returncode',None))
