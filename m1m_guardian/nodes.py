@@ -29,21 +29,20 @@ async def run_ssh(spec:NodeSpec, remote_cmd:str) -> int:
     return await proc.wait()
 
 async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
-    # داخل کانتینر، لاگ استریم stdout/err:
-    inner = r'''
-if ! command -v pgrep >/dev/null 2>&1; then
-  (apk add --no-cache procps >/dev/null 2>&1 || (apt-get update -y >/dev/null 2>&1 && apt-get install -y procps >/dev/null 2>&1) || (yum install -y procps-ng >/dev/null 2>&1) || true)
-fi
-pid=$(pgrep -xo xray || ps -o pid,comm | awk '/[x]ray/{print $1; exit}')
-if [ -z "$pid" ]; then
-  echo "[guardian-stream] no_xray_process"
-  exit 44
-fi
+    # Wrapper script: verify docker + container before exec
+    container = shlex.quote(spec.docker_container)
+    inner = r'''set -e
+if ! command -v docker >/dev/null 2>&1; then echo "[guardian-stream] no_docker"; exit 41; fi
+if ! docker inspect {container} >/dev/null 2>&1; then echo "[guardian-stream] no_container"; exit 42; fi
+if ! command -v pgrep >/dev/null 2>&1; then (apk add --no-cache procps >/dev/null 2>&1 || (apt-get update -y >/dev/null 2>&1 && apt-get install -y procps >/dev/null 2>&1) || (yum install -y procps-ng >/dev/null 2>&1) || true); fi
+pid=$(docker exec {container} pgrep -xo xray || docker exec {container} ps -o pid,comm | awk '/[x]ray/{print $1; exit}')
+if [ -z "$pid" ]; then echo "[guardian-stream] no_xray_process"; exit 44; fi
 echo "[guardian-stream] attach pid=$pid"
-exec stdbuf -oL cat /proc/$pid/fd/1 /proc/$pid/fd/2 2>/dev/null
-'''.strip()
+# Stream stdout/err of xray process inside container via cat on its fds
+exec docker exec -i {container} sh -lc "exec stdbuf -oL cat /proc/$pid/fd/1 /proc/$pid/fd/2 2>/dev/null"
+'''.format(container=container).strip()
 
-    remote = f"docker exec -i {shlex.quote(spec.docker_container)} sh -lc {shlex.quote(inner)}"
+    remote = f"sh -lc {shlex.quote(inner)}"
     cmd = _ssh_base(spec) + [remote]
     log.debug("starting remote log stream: node=%s cmd=%s", spec.name, ' '.join(cmd))
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
@@ -57,8 +56,11 @@ exec stdbuf -oL cat /proc/$pid/fd/1 /proc/$pid/fd/2 2>/dev/null
                 log.info("node=%s %s", spec.name, text.replace('[guardian-stream] ','').strip())
             else:
                 log.debug("node=%s raw-log: %s", spec.name, text)
-            yield line.decode("utf-8","ignore").rstrip("\n")
+            yield text
     finally:
+        rc = getattr(proc,'returncode',None)
         with contextlib.suppress(ProcessLookupError, AttributeError):
             proc.kill(); await proc.wait()
-        log.debug("remote log stream ended: node=%s rc=%s", spec.name, getattr(proc,'returncode',None))
+        log.debug("remote log stream ended: node=%s rc=%s", spec.name, rc)
+        # Emit sentinel so watcher can log reason centrally
+        yield f"[guardian-stream-exit rc={rc}]"
