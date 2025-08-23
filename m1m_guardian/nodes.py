@@ -29,17 +29,31 @@ async def run_ssh(spec:NodeSpec, remote_cmd:str) -> int:
     return await proc.wait()
 
 async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
-    # Wrapper script: verify docker + container before exec
     container = shlex.quote(spec.docker_container)
     inner = r'''set -e
 if ! command -v docker >/dev/null 2>&1; then echo "[guardian-stream] no_docker"; exit 41; fi
-if ! docker inspect {container} >/dev/null 2>&1; then echo "[guardian-stream] no_container"; exit 42; fi
+# Check container; if missing try auto-discover one containing xray
+if ! docker inspect {container} >/dev/null 2>&1; then
+  found=""; amb=""; cands=$(docker ps --format '{{{{.Names}}}}' 2>/dev/null || true)
+  for c in $cands; do
+    if docker exec "$c" pgrep -xo xray >/dev/null 2>&1; then
+      if [ -z "$found" ]; then found="$c"; else amb="1"; fi
+    fi
+  done
+  if [ -n "$found" ]; then
+    if [ -n "$amb" ]; then echo "[guardian-stream] auto_container_ambiguous using=$found"; else echo "[guardian-stream] auto_container=$found"; fi
+    target="$found"
+  else
+    echo "[guardian-stream] no_container"; exit 42
+  fi
+else
+  target={container}
+fi
 if ! command -v pgrep >/dev/null 2>&1; then (apk add --no-cache procps >/dev/null 2>&1 || (apt-get update -y >/dev/null 2>&1 && apt-get install -y procps >/dev/null 2>&1) || (yum install -y procps-ng >/dev/null 2>&1) || true); fi
-pid=$(docker exec {container} pgrep -xo xray || docker exec {container} ps -o pid,comm | awk '/[x]ray/{{print $1; exit}}')
+pid=$(docker exec "$target" pgrep -xo xray || docker exec "$target" ps -o pid,comm | awk '/[x]ray/{{print $1; exit}}')
 if [ -z "$pid" ]; then echo "[guardian-stream] no_xray_process"; exit 44; fi
-echo "[guardian-stream] attach pid=$pid"
-# Stream stdout/err of xray process inside container via cat on its fds
-exec docker exec -i {container} sh -lc "exec stdbuf -oL cat /proc/$pid/fd/1 /proc/$pid/fd/2 2>/dev/null"
+echo "[guardian-stream] attach pid=$pid container=$target"
+exec docker exec -i "$target" sh -lc "exec stdbuf -oL cat /proc/$pid/fd/1 /proc/$pid/fd/2 2>/dev/null"
 '''.format(container=container).strip()
 
     remote = f"sh -lc {shlex.quote(inner)}"
@@ -62,5 +76,4 @@ exec docker exec -i {container} sh -lc "exec stdbuf -oL cat /proc/$pid/fd/1 /pro
         with contextlib.suppress(ProcessLookupError, AttributeError):
             proc.kill(); await proc.wait()
         log.debug("remote log stream ended: node=%s rc=%s", spec.name, rc)
-        # Emit sentinel so watcher can log reason centrally
         yield f"[guardian-stream-exit rc={rc}]"
