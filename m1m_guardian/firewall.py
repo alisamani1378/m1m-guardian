@@ -1,4 +1,4 @@
-import asyncio, shlex
+import asyncio, shlex, time
 from .nodes import NodeSpec, _ssh_base
 
 SET_NAME="m1m_guardian"
@@ -10,7 +10,10 @@ def _cmd_flush_all(ip:str):
 conntrack -D -s {qip} >/dev/null 2>&1 || true
 fi'''
 
-async def ensure_rule(spec:NodeSpec):
+async def ensure_rule(spec:NodeSpec, force:bool=False):
+    last = getattr(spec, "_fw_last_ensure", 0)
+    if not force and time.time()-last < 300 and getattr(spec, "_fw_ensured", False):
+        return
     # جلوگیری از اجرای تکراری روی یک نود
     if getattr(spec, "_fw_ensured", False):
         return
@@ -34,6 +37,7 @@ true
     await p.wait()
     if p.returncode == 0:
         setattr(spec, "_fw_ensured", True)
+        setattr(spec, "_fw_last_ensure", time.time())
 
 async def ban_ip(spec:NodeSpec, ip:str, seconds:int):
     conntrack_block = _cmd_flush_all(ip)
@@ -45,6 +49,8 @@ IPT=$(command -v iptables-legacy || command -v iptables || true)
 # Try add; if set missing recreate then retry once
 $SUDO ipset add {SET_NAME} {shlex.quote(ip)} timeout {int(seconds)} -exist 2>/dev/null || {{ $SUDO ipset create {SET_NAME} hash:ip timeout 0 -exist 2>/dev/null || true; $SUDO ipset add {SET_NAME} {shlex.quote(ip)} timeout {int(seconds)} -exist || true; }}
 {conntrack_block}
+# verify membership (best-effort)
+$SUDO ipset test {SET_NAME} {shlex.quote(ip)} >/dev/null 2>&1 || echo "[guardian-firewall] test_failed {shlex.quote(ip)}"
 true'''
     cmd = _ssh_base(spec) + [inner]
     p = await asyncio.create_subprocess_exec(*cmd)
