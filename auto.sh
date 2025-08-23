@@ -70,9 +70,9 @@ menu() {
   clear
   echo "m1m-guardian installer"
   echo "1) Install/Update & Start"
-  echo "2) Add node"
-  echo "3) Remove node"
-  echo "4) Edit inbound limits"
+  echo "2) Config menu (nodes & inbound limits)"
+  echo "3) Show current config"
+  echo "4) Restart service"
   echo "5) Uninstall (wipe)"
   echo "0) Exit"
   read -rp "> " c
@@ -80,33 +80,27 @@ menu() {
     1)
       need_root; pkg_install; clone_or_update; make_venv; init_cfg; install_service
       "$VENV/bin/python" -m m1m_guardian.config --show "$CFG"
-      echo "Service is running: systemctl status m1m-guardian"
-      ;;
+      echo "Service is running: systemctl status m1m-guardian" ;;
     2)
       need_root; clone_or_update; make_venv; init_cfg
-      "$VENV/bin/python" -m m1m_guardian.config --add-node "$CFG"
-      systemctl restart m1m-guardian || true
-      ;;
+      "$VENV/bin/python" -m m1m_guardian.config --menu "$CFG"
+      systemctl restart m1m-guardian || true ;;
     3)
-      need_root; clone_or_update; make_venv; init_cfg
-      "$VENV/bin/python" -m m1m_guardian.config --remove-node "$CFG"
-      systemctl restart m1m-guardian || true
-      ;;
+      clone_or_update; make_venv; init_cfg
+      "$VENV/bin/python" -m m1m_guardian.config --show "$CFG" ;;
     4)
-      need_root; clone_or_update; make_venv; init_cfg
-      "$VENV/bin/python" -m m1m_guardian.config --edit-limits "$CFG"
-      systemctl restart m1m-guardian || true
-      ;;
+      need_root; systemctl restart m1m-guardian || true ;;
     5)
       need_root
       systemctl disable --now m1m-guardian || true
       rm -f "$SERVICE"; systemctl daemon-reload || true
       rm -rf "$INSTALL_DIR" "$ETC_DIR"
-      echo "Wiped. (Redis DB kept)."
-      ;;
+      echo "Wiped. (Redis DB kept)." ;;
     0) exit 0 ;;
-    *) echo "Bad choice";;
+    *) echo "Bad choice" ;;
   esac
+  read -rp "Press Enter to continue..." _
+  menu
 }
 
 # non-interactive quick mode
