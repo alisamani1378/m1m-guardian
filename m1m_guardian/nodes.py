@@ -35,7 +35,7 @@ async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
 if ! command -v docker >/dev/null 2>&1; then echo "[guardian-stream] no_docker"; exit 41; fi
 if ! docker inspect {container} >/dev/null 2>&1; then echo "[guardian-stream] no_container"; exit 42; fi
 if ! command -v pgrep >/dev/null 2>&1; then (apk add --no-cache procps >/dev/null 2>&1 || (apt-get update -y >/dev/null 2>&1 && apt-get install -y procps >/dev/null 2>&1) || (yum install -y procps-ng >/dev/null 2>&1) || true); fi
-pid=$(docker exec {container} pgrep -xo xray || docker exec {container} ps -o pid,comm | awk '/[x]ray/{print $1; exit}')
+pid=$(docker exec {container} pgrep -xo xray || docker exec {container} ps -o pid,comm | awk '/[x]ray/{{print $1; exit}}')
 if [ -z "$pid" ]; then echo "[guardian-stream] no_xray_process"; exit 44; fi
 echo "[guardian-stream] attach pid=$pid"
 # Stream stdout/err of xray process inside container via cat on its fds
