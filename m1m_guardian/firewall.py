@@ -19,10 +19,13 @@ def _cmd_ensure_ports(ports):
     return " ; ".join(parts)
 
 async def ensure_rule(spec:NodeSpec):
-    # یکبار در هر نود
     inner = f'''
+# ensure ipset installed
+(command -v ipset >/dev/null 2>&1) || (apt-get update -y >/dev/null 2>&1 && apt-get install -y ipset >/dev/null 2>&1) || (apk add --no-cache ipset >/dev/null 2>&1) || (yum install -y ipset >/dev/null 2>&1) || true
+IPT=$(command -v iptables-legacy || command -v iptables)
+[ -n "$IPT" ] || exit 0
 ipset list {SET_NAME} >/dev/null 2>&1 || ipset create {SET_NAME} hash:ip timeout 0
-iptables -C INPUT -m set --match-set {SET_NAME} src -j DROP 2>/dev/null || iptables -I INPUT 1 -m set --match-set {SET_NAME} src -j DROP
+$IPT -C INPUT -m set --match-set {SET_NAME} src -j DROP 2>/dev/null || $IPT -I INPUT 1 -m set --match-set {SET_NAME} src -j DROP
 true
 '''.strip()
     cmd = _ssh_base(spec) + [inner]
@@ -31,6 +34,10 @@ true
 
 async def ban_ip(spec:NodeSpec, ip:str, seconds:int, ports:list[int]):
     inner = f'''
+# ensure ipset installed (race-safe)
+(command -v ipset >/dev/null 2>&1) || true
+IPT=$(command -v iptables-legacy || command -v iptables)
+[ -n "$IPT" ] || exit 0
 ipset add {SET_NAME} {shlex.quote(ip)} timeout {int(seconds)} -exist
 {_cmd_ensure_ports(ports)} {shlex.quote(ip)}
 true
