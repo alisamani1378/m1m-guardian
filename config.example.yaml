@@ -1,0 +1,26 @@
+redis:
+  url: "redis://127.0.0.1:6379/0"
+
+# چند دقیقه بن (ipset timeout)
+ban_minutes: 10
+
+# اگر true، IP قدیمی کاربر روی همه نودها هم drop شود
+cross_node_ban: true
+
+# پورت‌هایی که معمولاً Xray گوش می‌دهد (برای conntrack delete)
+ports: [8080, 5540, 2222]
+
+# محدودیت هم‌زمانی برای هر inbound
+inbounds_limit:
+  default: 1
+  VIP: 1
+  limit: 2
+
+nodes:
+  # نمونه—با منو اضافه می‌شود
+  # - name: gcore-usa
+  #   host: 203.0.113.10
+  #   ssh_user: root
+  #   ssh_port: 22
+  #   ssh_key: /root/.ssh/id_rsa   # یا ssh_pass: "password"
+  #   docker_container: marzban-node

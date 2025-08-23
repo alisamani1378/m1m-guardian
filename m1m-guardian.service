@@ -1,0 +1,18 @@
+[Unit]
+Description=m1m-guardian (Xray multi-IP guardian)
+After=network-online.target redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/m1m-guardian
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/m1m-guardian/.venv/bin/python -m m1m_guardian.main --config /etc/m1m-guardian/config.yaml
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
