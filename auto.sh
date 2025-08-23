@@ -74,6 +74,7 @@ menu() {
   echo "3) Show current config"
   echo "4) Restart service"
   echo "5) Uninstall (wipe)"
+  echo "6) View live logs"
   echo "0) Exit"
   read -rp "> " c
   case "$c" in
@@ -96,6 +97,11 @@ menu() {
       rm -f "$SERVICE"; systemctl daemon-reload || true
       rm -rf "$INSTALL_DIR" "$ETC_DIR"
       echo "Wiped. (Redis DB kept)." ;;
+    6)
+      need_root
+      echo "[logs] Ctrl+C برای خروج"
+      journalctl -u m1m-guardian -f --no-hostname -o short-iso || true
+      ;;
     0) exit 0 ;;
     *) echo "Bad choice" ;;
   esac
