@@ -86,9 +86,13 @@ class NodeWatcher:
                         # single notifier message
                         if success_nodes:
                             nodes_list = ', '.join(success_nodes)
-                            msg = (f"🚫 IP {old_ip} روی نودهای: {nodes_list} به مدت {self.ban_minutes} دقیقه بن شد\n"
+                            # Structured Persian message to avoid RTL/LTR jumble; wrap dynamic tokens in backticks
+                            msg = (f"🚫 *بن IP*\n"
+                                   f"IP: `{old_ip}`\n"
                                    f"کاربر: `{display_email}`\n"
-                                   f"اینباند: {inbound}")
+                                   f"اینباند: `{inbound}`\n"
+                                   f"نودها: {nodes_list}\n"
+                                   f"مدت: {self.ban_minutes} دقیقه")
                             if failed_nodes:
                                 msg += f"\nنودهای ناموفق: {', '.join(failed_nodes)}"
                             await self._notify(msg)
