@@ -77,10 +77,16 @@ class NodeWatcher:
                             (f" failed={','.join(failed_nodes)}" if failed_nodes else ''),
                             self.ban_minutes)
                         await self.store.mark_banned(old_ip, self.ban_minutes*60)
+                        # sanitize user: drop leading numeric id + dot
+                        display_email=email
+                        if '.' in display_email:
+                            first, rest = display_email.split('.',1)
+                            if first.isdigit():
+                                display_email=rest
                         # single notifier message
                         if success_nodes:
                             msg = (f"IP {old_ip} banned on {', '.join(success_nodes)} for {self.ban_minutes}m\n"
-                                   f"user: {email}\n"
+                                   f"user: {display_email}\n"
                                    f"inbound: {inbound}")
                             if failed_nodes:
                                 msg += f"\nFailed nodes: {', '.join(failed_nodes)}"
