@@ -1,9 +1,9 @@
 import argparse, asyncio, logging, sys, yaml, os
-from .config import load, ensure_defaults
+from .config import load, ensure_defaults, save
 from .store import Store
 from .nodes import NodeSpec
 from .watcher import NodeWatcher
-from .notify import TelegramNotifier
+from .notify import TelegramNotifier, TelegramBotPoller
 
 def setup_logging(level:str="INFO"):
     h = logging.StreamHandler(sys.stdout)
@@ -40,8 +40,11 @@ async def amain(config_path:str, log_level:str):
 
     notifier = None
     tcfg = cfg.get("telegram", {})
+    poller_task=None
     if tcfg.get("bot_token") and tcfg.get("chat_id"):
         notifier = TelegramNotifier(tcfg.get("bot_token"), tcfg.get("chat_id"))
+        poller=TelegramBotPoller(tcfg.get("bot_token"), tcfg.get("chat_id"), config_path, load, save)
+        poller_task=asyncio.create_task(poller.start())
 
     if not nodes:
         logging.error("No nodes configured. Use auto.sh -> option 2 (Config menu) to add a node.")
@@ -53,7 +56,7 @@ async def amain(config_path:str, log_level:str):
         watchers.append(NodeWatcher(spec, store, limits, ban_minutes, nodes, cross, notifier).run())
 
     logging.info("Starting %d node watchers...", len(watchers))
-    await asyncio.gather(*watchers)
+    await asyncio.gather(*watchers, *( [poller_task] if poller_task else [] ))
 
 def main():
     p=argparse.ArgumentParser()
