@@ -213,15 +213,36 @@ class TelegramBotPoller:
                     st['step']=4; await self._send("نام کانتینر (مثلا marzban-node):", chat_id=chat_id)
                 elif step==4:
                     collecting['docker_container']=text or 'marzban-node'
-                    st['step']=5; await self._send("نوع احراز: 1=مسیر کلید 2=پسورد", chat_id=chat_id)
+                    st['step']=5; await self._send("نوع احراز: 1=مسیر کلید 2=پسورد 3=متن کلید", chat_id=chat_id)
                 elif step==5:
                     if text=='2':
                         st['auth']='pass'; st['step']=6; await self._send("پسورد SSH را بفرست:", chat_id=chat_id)
+                    elif text=='3':
+                        st['auth']='keytext'; st['step']=6; await self._send("متن کامل کلید خصوصی را ارسال کن (با -----BEGIN شروع می شود):", chat_id=chat_id)
                     else:
                         st['auth']='key'; st['step']=6; await self._send("مسیر کلید خصوصی (مثلا /root/.ssh/id_rsa):", chat_id=chat_id)
                 elif step==6:
-                    if st.get('auth')=='pass': collecting['ssh_pass']=text
-                    else: collecting['ssh_key']=text
+                    if st.get('auth')=='pass':
+                        collecting['ssh_pass']=text
+                    elif st.get('auth')=='key':
+                        collecting['ssh_key']=text
+                    elif st.get('auth')=='keytext':
+                        # ذخیره متن کلید در فایل امن
+                        try:
+                            import os, stat
+                            keys_dir='/etc/m1m-guardian/keys'
+                            os.makedirs(keys_dir, exist_ok=True)
+                            safe_name=collecting.get('name','node')
+                            fname=os.path.join(keys_dir, f"{safe_name}.key")
+                            with open(fname,'w',encoding='utf-8') as f:
+                                f.write(text.strip()+('\n' if not text.endswith('\n') else ''))
+                            try:
+                                os.chmod(fname, 0o600)
+                            except Exception:
+                                pass
+                            collecting['ssh_key']=fname
+                        except Exception as e:
+                            await self._send(f"خطا در ذخیره کلید: {e}", chat_id=chat_id)
                     cfg.setdefault('nodes',[]).append(collecting)
                     self.save(self.cfg_path,cfg)
                     await self._send(f"نود {collecting['name']} اضافه شد (ریست کن تا فعال شود).", chat_id=chat_id)
