@@ -13,14 +13,15 @@ class NodeSpec:
     def __repr__(self): return f"<Node {self.name}@{self.host}:{self.ssh_port}>"
 
 def _ssh_base(spec:NodeSpec)->List[str]:
-    common = [
-        "ssh","-o","BatchMode=yes","-o","StrictHostKeyChecking=no",
-        "-o","ServerAliveInterval=30","-o","ServerAliveCountMax=3",
-        "-p", str(spec.ssh_port),
-        f"{spec.ssh_user}@{spec.host}",
-    ]
-    if spec.ssh_key: common = ["ssh","-i",spec.ssh_key] + common[1:]
-    if spec.ssh_pass: common = ["sshpass","-p",spec.ssh_pass] + common
+    # Rebuild to drop BatchMode when password auth is used (sshpass needs prompts allowed)
+    opts=["-o","StrictHostKeyChecking=no","-o","ServerAliveInterval=30","-o","ServerAliveCountMax=3"]
+    if not spec.ssh_pass:  # only safe for key auth
+        opts=["-o","BatchMode=yes"]+opts
+    common=["ssh", *opts, "-p", str(spec.ssh_port), f"{spec.ssh_user}@{spec.host}"]
+    if spec.ssh_key:
+        common=["ssh","-i",spec.ssh_key]+common[1:]
+    if spec.ssh_pass:
+        common=["sshpass","-p",spec.ssh_pass]+common
     return common
 
 async def _ssh_run_capture(cmd:list[str], timeout:float=15.0):

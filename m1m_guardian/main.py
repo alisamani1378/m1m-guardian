@@ -43,6 +43,11 @@ async def amain(config_path:str, log_level:str):
     poller_task=None
     if tcfg.get("bot_token") and tcfg.get("chat_id"):
         notifier = TelegramNotifier(tcfg.get("bot_token"), tcfg.get("chat_id"))
+        await notifier.delete_webhook()
+        try:
+            await notifier.send("m1m-guardian شروع شد ✅")
+        except Exception:
+            pass
         poller=TelegramBotPoller(tcfg.get("bot_token"), tcfg.get("chat_id"), config_path, load, save)
         poller_task=asyncio.create_task(poller.start())
 

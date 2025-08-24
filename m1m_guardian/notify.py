@@ -32,6 +32,19 @@ class TelegramNotifier:
         except Exception as e:
             log.warning("telegram send failed: %s", e)
 
+    async def delete_webhook(self):
+        if not self.enabled: return
+        await asyncio.to_thread(self._call_delete_webhook)
+
+    def _call_delete_webhook(self):
+        url = f"https://api.telegram.org/bot{self.bot_token}/deleteWebhook"
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                if resp.status!=200:
+                    log.debug("deleteWebhook status=%s", resp.status)
+        except Exception as e:
+            log.debug("deleteWebhook failed: %s", e)
+
 class TelegramBotPoller:
     """Simple long-polling command handler (admin-only). Supports:
     /status, /limits, /nodes, /setlimit name value, /dellimit name
@@ -43,6 +56,7 @@ class TelegramBotPoller:
         self.load=load_fn; self.save=save_fn; self.offset=0; self.running=True
 
     async def start(self):
+        log.info("telegram poller started")
         while self.running:
             try:
                 updates = await asyncio.to_thread(self._get_updates)
