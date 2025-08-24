@@ -13,10 +13,11 @@ def ensure_defaults(cfg:dict):
     cfg.setdefault("ban_minutes", 10)
     cfg.setdefault("cross_node_ban", True)
     cfg.setdefault("rejected_threshold", 8)  # new: how many rejected/invalid before ban
+    cfg.setdefault("telegram", {"bot_token":"", "chat_id":""})
     if "ports" not in cfg or cfg["ports"] in (None, ""):
         cfg["ports"] = []  # empty list means no conntrack flush
     if isinstance(cfg.get("ports"), int):
-        cfg["ports"]=[cfg["ports"]]
+        cfg["ports"]= [cfg["ports"]]
     cfg.setdefault("inbounds_limit", {})
     if not isinstance(cfg.get("nodes"), list):
         cfg["nodes"]=[]
@@ -268,6 +269,28 @@ def manage_ports(path):
             print("Bad choice")
 
 
+def manage_telegram(path):
+    cfg=load(path); ensure_defaults(cfg)
+    cur=cfg.get("telegram", {})
+    print("\n=== Telegram Settings ===")
+    print(f"Bot token: {'<set>' if cur.get('bot_token') else '<empty>'}")
+    print(f"Chat ID: {cur.get('chat_id') or '<empty>'}")
+    print("1) Set/Update  2) Clear  b) Back")
+    c=input("> ").strip().lower()
+    if c=='1':
+        bot=input("Bot token: ").strip()
+        chat=input("Chat ID (numeric or @channelusername): ").strip()
+        cfg['telegram']['bot_token']=bot
+        cfg['telegram']['chat_id']=chat
+        save(path,cfg); print("[ok] saved telegram")
+    elif c=='2':
+        cfg['telegram']={"bot_token":"","chat_id":""}; save(path,cfg); print("[ok] cleared")
+    elif c=='b':
+        return
+    else:
+        print("Bad choice")
+
+
 def interactive_menu(path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     ensure_defaults(cfg:=load(path))
@@ -280,6 +303,7 @@ def interactive_menu(path):
         print("2) Manage nodes")
         print("3) Manage inbound limits")
         print("4) Manage ports (conntrack flush)")
+        print("5) Telegram settings")
         print("0) Exit")
         c=input("> ").strip()
         if c=='0': break
@@ -287,6 +311,7 @@ def interactive_menu(path):
         elif c=='2': manage_nodes(path)
         elif c=='3': manage_limits(path)
         elif c=='4': manage_ports(path)
+        elif c=='5': manage_telegram(path)
         else: print("Bad choice")
 
 def main():

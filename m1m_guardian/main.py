@@ -3,6 +3,7 @@ from .config import load, ensure_defaults
 from .store import Store
 from .nodes import NodeSpec
 from .watcher import NodeWatcher
+from .notify import TelegramNotifier
 
 def setup_logging(level:str="INFO"):
     h = logging.StreamHandler(sys.stdout)
@@ -37,6 +38,11 @@ async def amain(config_path:str, log_level:str):
     ban_minutes = int(cfg.get("ban_minutes",10))
     cross = bool(cfg.get("cross_node_ban", True))
 
+    notifier = None
+    tcfg = cfg.get("telegram", {})
+    if tcfg.get("bot_token") and tcfg.get("chat_id"):
+        notifier = TelegramNotifier(tcfg.get("bot_token"), tcfg.get("chat_id"))
+
     if not nodes:
         logging.error("No nodes configured. Use auto.sh -> option 2 (Config menu) to add a node.")
         return
@@ -44,7 +50,7 @@ async def amain(config_path:str, log_level:str):
     watchers=[]
     for spec in nodes:
         logging.getLogger("guardian.start").debug("starting watcher for node=%s host=%s", spec.name, spec.host)
-        watchers.append(NodeWatcher(spec, store, limits, ban_minutes, nodes, cross).run())
+        watchers.append(NodeWatcher(spec, store, limits, ban_minutes, nodes, cross, notifier).run())
 
     logging.info("Starting %d node watchers...", len(watchers))
     await asyncio.gather(*watchers)

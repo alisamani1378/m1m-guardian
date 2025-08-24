@@ -2,13 +2,14 @@ import asyncio, logging
 from .nodes import NodeSpec, stream_logs
 from .parser import parse_line
 from .firewall import ensure_rule, ban_ip
+from .notify import TelegramNotifier  # new import
 
 log = logging.getLogger("guardian.watcher")
 
 class NodeWatcher:
-    def __init__(self, spec:NodeSpec, store, limits:dict, ban_minutes:int, all_nodes:list[NodeSpec], cross_node_ban:bool):
+    def __init__(self, spec:NodeSpec, store, limits:dict, ban_minutes:int, all_nodes:list[NodeSpec], cross_node_ban:bool, notifier:TelegramNotifier|None=None):
         self.spec=spec; self.store=store; self.limits=limits; self.ban_minutes=ban_minutes
-        self.all_nodes=all_nodes; self.cross=cross_node_ban
+        self.all_nodes=all_nodes; self.cross=cross_node_ban; self.notifier=notifier
         self._ensured=False
 
     def limit_for(self, inbound:str):
@@ -33,12 +34,24 @@ class NodeWatcher:
                         if old_ip == ip: continue
                         if await self.store.is_banned_recently(old_ip): continue
                         targets = self.all_nodes if self.cross else [self.spec]
+                        banned_nodes=[]
                         for node in targets:
                             await ensure_rule(node)
                             await ban_ip(node, old_ip, self.ban_minutes*60)
+                            banned_nodes.append(node.name)
                             log.warning("banned old ip=%s (user=%s inbound=%s) on node=%s for %dm",
                                 old_ip, email, inbound, node.name, self.ban_minutes)
                         await self.store.mark_banned(old_ip, self.ban_minutes*60)
+                        if self.notifier:
+                            # Persian notification message per request
+                            msg = (
+                                f"IP {old_ip} در نودهای {', '.join(banned_nodes)} به مدت {self.ban_minutes} دقیقه بلاک شد.\n"
+                                f"کاربر: {email}\nاین‌باند: {inbound}"
+                            )
+                            try:
+                                await self.notifier.send(msg)
+                            except Exception as ne:
+                                log.debug("telegram notify failed: %s", ne)
                 log.warning("log stream ended for %s, reconnecting...", self.spec.name)
             except Exception as e:
                 log.error("watcher error on %s: %s", self.spec.name, e)
