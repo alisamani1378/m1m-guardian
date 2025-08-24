@@ -46,8 +46,10 @@ async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
             "fi\n"
             "if ! $SUDO docker inspect \"$TARGET\" >/dev/null 2>&1; then echo '[guardian-stream] no_container'; exit 42; fi\n"
             "echo '[guardian-stream] attach container='$TARGET\n"
-            # Inner loop: find pid (pgrep else grep), then cat fds, re-loop on exit
-            "exec $SUDO docker exec -i \"$TARGET\" sh -c 'while true; do "
+            "exec $SUDO docker exec -i \"$TARGET\" sh -c '"
+            # ensure pgrep available (procps) else try install quietly
+            "if ! command -v pgrep >/dev/null 2>&1; then (apk add --no-cache procps 2>/dev/null || (apt-get update -y >/dev/null 2>&1 && apt-get install -y procps >/dev/null 2>&1) || yum install -y procps-ng >/dev/null 2>&1 || true); fi; "
+            "no_cnt=0; while true; do "
             "if command -v pgrep >/dev/null 2>&1; then pid=$(pgrep -xo xray); else pid=$(ps | grep -i \\bxray\\b | grep -v grep | awk \"{print $1; exit}\"); fi; "
             "if [ -z \"$pid\" ]; then echo \"[guardian-stream] no_xray_process\"; sleep 2; continue; fi; "
             "[ -r /proc/$pid/fd/1 ] || { echo \"[guardian-stream] fd_unreadable pid=$pid\"; sleep 2; continue; }; "
