@@ -2,8 +2,20 @@ import logging, time, asyncio
 from typing import Set
 from .notify import TelegramNotifier
 
-KEY_LOGGERS = {"guardian.nodes", "guardian.watcher"}
-KEYWORDS = ("ssh basic check failed", "no_xray_process", "no_container", "docker not installed", "spawn ssh failed", "log stream wrapper ended", "attach container", "log stream ended", "ensured firewall")
+KEY_LOGGERS = {"guardian.nodes", "guardian.watcher", "guardian.start"}
+KEYWORDS = (
+    "ssh basic check failed",
+    "no_xray_process",
+    "no_container",
+    "docker not installed",
+    "spawn ssh failed",
+    "log stream wrapper ended",
+    "attach container",
+    "follow pid=",
+    "attached and streaming logs",
+    "ensured firewall",
+    "banned old ip="
+)
 
 class TelegramLogHandler(logging.Handler):
     def __init__(self, notifier:TelegramNotifier, min_interval:float=15.0):
@@ -43,4 +55,3 @@ def install_telegram_log_forward(notifier:TelegramNotifier, min_interval:float=1
     h=TelegramLogHandler(notifier, min_interval=min_interval)
     logging.getLogger().addHandler(h)
     return h
-
