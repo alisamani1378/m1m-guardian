@@ -1,4 +1,5 @@
 import asyncio, json, logging, urllib.request, urllib.parse
+import os, time
 from typing import List, Dict, Tuple
 from .firewall import unban_ip, ensure_rule
 from .nodes import NodeSpec
@@ -74,6 +75,11 @@ class TelegramBotPoller:
         self.session_cache:Dict[str,Tuple[str,str,List[str]]]={}  # sid -> (inbound,email,ips)
         self.banned_cache:Dict[str,int]={}  # ip -> ttl
         self._last_restart_ts=0.0  # cooldown tracking
+        # persistent offset file
+        cfg_dir=os.path.dirname(self.cfg_path) or '/etc/m1m-guardian'
+        os.makedirs(cfg_dir, exist_ok=True)
+        self.offset_file=os.path.join(cfg_dir, 'telegram.offset')
+        self._load_offset()
 
     # ---------------- core polling ----------------
     async def start(self):
@@ -84,6 +90,8 @@ class TelegramBotPoller:
                 if updates:
                     for u in updates:
                         self.offset = max(self.offset, u.get('update_id',0)+1)
+                        # persist offset after each processed update to avoid replay after restart
+                        self._save_offset()
                         await self._handle(u)
             except Exception as e:
                 log.debug("poll error: %s", e)
@@ -358,7 +366,6 @@ class TelegramBotPoller:
         await self._menu_banned(chat_id)
 
     async def _restart_service(self, chat_id:str):
-        import time
         now=time.time()
         if now - self._last_restart_ts < 60:  # 60s cooldown
             await self._send("⏳ ریست اخیر انجام شد؛ چند ثانیه دیگر دوباره تلاش کن.", chat_id=chat_id)
@@ -376,6 +383,24 @@ class TelegramBotPoller:
             await proc.wait()
         except Exception as e:
             log.debug("restart error: %s", e)
+    # ---------------- offset persistence ----------------
+    def _load_offset(self):
+        try:
+            if os.path.isfile(self.offset_file):
+                with open(self.offset_file,'r',encoding='utf-8') as f:
+                    val=f.read().strip()
+                    if val.isdigit():
+                        self.offset=int(val)
+                        log.debug("loaded telegram offset=%s", self.offset)
+        except Exception as e:
+            log.debug("load offset failed: %s", e)
+
+    def _save_offset(self):
+        try:
+            with open(self.offset_file,'w',encoding='utf-8') as f:
+                f.write(str(self.offset))
+        except Exception as e:
+            log.debug("save offset failed: %s", e)
 
     # ---------------- submenus ----------------
     def _find_node(self,cfg,name):
