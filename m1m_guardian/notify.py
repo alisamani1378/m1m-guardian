@@ -73,6 +73,7 @@ class TelegramBotPoller:
         # caches
         self.session_cache:Dict[str,Tuple[str,str,List[str]]]={}  # sid -> (inbound,email,ips)
         self.banned_cache:Dict[str,int]={}  # ip -> ttl
+        self._last_restart_ts=0.0  # cooldown tracking
 
     # ---------------- core polling ----------------
     async def start(self):
@@ -357,6 +358,12 @@ class TelegramBotPoller:
         await self._menu_banned(chat_id)
 
     async def _restart_service(self, chat_id:str):
+        import time
+        now=time.time()
+        if now - self._last_restart_ts < 60:  # 60s cooldown
+            await self._send("⏳ ریست اخیر انجام شد؛ چند ثانیه دیگر دوباره تلاش کن.", chat_id=chat_id)
+            return
+        self._last_restart_ts=now
         await self._send("درحال ریست سرویس...", chat_id=chat_id)
         try:
             asyncio.create_task(self._run_restart())
