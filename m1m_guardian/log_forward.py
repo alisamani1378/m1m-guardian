@@ -1,5 +1,4 @@
 import logging, time, asyncio
-from typing import Set
 from .notify import TelegramNotifier
 import re
 
@@ -64,9 +63,26 @@ class TelegramLogHandler(logging.Handler):
         if "log stream wrapper ended" in low:
             rc=re.search(r"rc=(\d+)", raw)
             return f"⚠️ نود {node}: استریم لاگ قطع شد (rc={rc.group(1) if rc else '?'}). تلاش برای اتصال مجدد..."
+        if "attach container" in low:
+            return f"🔌 نود {node}: اتصال به کانتینر برقرار شد."  # edit button can be offered manually via /start
+        if "attached and streaming logs" in low:
+            return f"✅ نود {node}: استریم لاگ فعال شد."
         if "banned old ip=" in low:
-            # keep concise ban notice
-            return raw  # already شامل ip و user است
+            # raw pattern: banned old ip=IP (user=... inbound=limit) on node=NAME for 10m
+            m_ip=re.search(r"ip=([0-9A-Fa-f:.]+)", raw)
+            m_user=re.search(r"user=([^\s)]+)", raw)
+            m_inb=re.search(r"inbound=([^\s)]+)", raw)
+            m_dur=re.search(r" for ([0-9]+m)", raw)
+            ip=m_ip.group(1) if m_ip else '?'
+            usr=m_user.group(1) if m_user else '?'
+            # strip leading numeric id + dot if present
+            if '.' in usr:
+                first,rest=usr.split('.',1)
+                if first.isdigit():
+                    usr=rest
+            inb=m_inb.group(1) if m_inb else '?'
+            dur=m_dur.group(1) if m_dur else ''
+            return f"🚫 IP {ip} بن شد روی نود {node} {('برای '+dur) if dur else ''}\nکاربر: {usr}\nایnbاند: {inb}"
         # default for warnings/errors
         if record.levelno >= logging.WARNING:
             return f"⚠️ نود {node}: {raw}"
@@ -78,6 +94,7 @@ class TelegramLogHandler(logging.Handler):
             return
         raw_msg=record.getMessage()
         low=raw_msg.lower()
+        node=self._extract_node(raw_msg)
         if record.levelno < logging.WARNING and not any(kw in low for kw in KEYWORDS):
             return
         formatted=self._format(record)
@@ -91,7 +108,11 @@ class TelegramLogHandler(logging.Handler):
         self._last[key]=now
         try:
             loop=asyncio.get_running_loop()
-            loop.create_task(self.notifier.send(formatted))
+            # اگر پیام خطا/هشدار است دکمه ویرایش نود بفرست
+            if (formatted.startswith('❌') or formatted.startswith('⚠️')) and node and node!='?':
+                loop.create_task(self.notifier.send_with_inline(formatted, [[('✏️ ویرایش نود', f'node:{node}')]]))
+            else:
+                loop.create_task(self.notifier.send(formatted))
         except RuntimeError:
             pass
 

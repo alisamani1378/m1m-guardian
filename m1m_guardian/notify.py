@@ -74,6 +74,7 @@ class TelegramBotPoller:
         os.makedirs(cfg_dir, exist_ok=True)
         self.offset_file=os.path.join(cfg_dir, 'telegram.offset')
         self._load_offset()
+        self._pending_post_add:dict[str,float]={}
 
     # ---------------- core polling ----------------
     async def start(self):
@@ -245,7 +246,10 @@ class TelegramBotPoller:
                             await self._send(f"خطا در ذخیره کلید: {e}", chat_id=chat_id)
                     cfg.setdefault('nodes',[]).append(collecting)
                     self.save(self.cfg_path,cfg)
-                    await self._send(f"نود {collecting['name']} اضافه شد (ریست کن تا فعال شود).", chat_id=chat_id)
+                    await self._send(f"نود {collecting['name']} اضافه شد. در حال ریست و تست اتصال...", chat_id=chat_id)
+                    # زمان ذخیره برای جلوگیری از چند تست همزمان اگر اسپم شود
+                    self._pending_post_add[collecting['name']]=time.time()
+                    asyncio.create_task(self._post_add_node(collecting['name'], chat_id))
                     self.state.pop(chat_id,None)
                     await self._menu_nodes(chat_id)
             elif kind=='edit_setting_banmin':
@@ -495,3 +499,44 @@ class TelegramBotPoller:
         for n in nodes:
             lines.append(f"• `{n.get('name')}` → {n.get('host')}:{n.get('ssh_port')} cnt={n.get('docker_container')}")
         await self._send("\n".join(lines), self._kb([[('↩️ برگشت','mn_refresh')]]), chat_id=chat_id, parse_mode='Markdown')
+
+    async def _post_add_node(self, node_name:str, chat_id:str):
+        """Restart service then run quick SSH+container+xray checks and report Persian status."""
+        try:
+            # restart service (not subject to cooldown)
+            await self._send("♻️ ریست سرویس برای اعمال نود جدید...", chat_id=chat_id)
+            proc=await asyncio.create_subprocess_exec('sh','-lc','systemctl restart m1m-guardian || true')
+            await proc.wait()
+            await asyncio.sleep(5)
+            cfg=self.load(self.cfg_path)
+            node=self._find_node(cfg,node_name)
+            if not node:
+                await self._send(f"❌ نود {node_name}: پس از ریست در پیکربندی یافت نشد.", chat_id=chat_id); return
+            # Basic SSH
+            from .nodes import NodeSpec as _NS, _ssh_run_capture as _cap, _ssh_base as _base  # type: ignore
+            spec=_NS(node.get('name'), node.get('host'), node.get('ssh_user'), node.get('ssh_port'), node.get('docker_container'), node.get('ssh_key'), node.get('ssh_pass'))
+            sentinel='__M1M_OK__'
+            rc,out=await _cap(_base(spec)+[f'echo {sentinel}'], timeout=10)
+            if rc!=0 or sentinel.encode() not in out:
+                await self._send(f"❌ نود {node_name}: SSH برقرار نشد (rc={rc}).\n{out.decode(errors='ignore')[-200:]}", chat_id=chat_id)
+                return
+            # Check docker container + xray process
+            check_script=(
+                "SUDO=; if [ \"$(id -u)\" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO=sudo; fi; fi; "
+                "if ! command -v docker >/dev/null 2>&1; then echo NO_DOCKER; exit 1; fi; "
+                f"C={node.get('docker_container')}; "
+                "if ! $SUDO docker inspect $C >/dev/null 2>&1; then echo NO_CONTAINER; exit 2; fi; "
+                "pid=$($SUDO docker exec $C sh -lc 'pgrep -xo xray || ps | grep -i \\bxray\\b | grep -v grep | awk {\"{print $1;exit}\"}'); "
+                "if [ -z \"$pid\" ]; then echo NO_XRAY; exit 3; fi; echo OK:$pid;"
+            )
+            rc2,out2=await _cap(_base(spec)+["sh","-lc",check_script], timeout=20)
+            text=out2.decode(errors='ignore').strip()
+            if rc2!=0 or not text.startswith('OK:'):
+                msg_map={'NO_DOCKER':'docker نصب نیست','NO_CONTAINER':'کانتینر پیدا نشد','NO_XRAY':'فرایند xray یافت نشد'}
+                human=msg_map.get(text.split('\n')[0],'نامشخص')
+                await self._send(f"⚠️ نود {node_name}: اتصال SSH برقرار شد اما مشکل: {human}\nجزئیات: {text[:180]}", chat_id=chat_id)
+                return
+            pid=text.split(':',1)[1]
+            await self._send(f"✅ نود {node_name}: متصل و در حال استریم (PID={pid}).", chat_id=chat_id)
+        except Exception as e:
+            await self._send(f"❌ نود {node_name}: خطای داخلی تست اتصال: {e}", chat_id=chat_id)
