@@ -14,15 +14,19 @@ class TelegramNotifier:
         if not self.enabled:
             log.debug("Telegram notifier disabled (missing token/chat_id)")
 
-    async def send(self, text:str):
+    async def send(self, text:str, parse_mode:str|None='Markdown'):
         if not self.enabled: return
-        await asyncio.to_thread(self._post, { 'chat_id': self.chat_id, 'text': text[:4000], 'disable_web_page_preview':'true'})
+        payload={ 'chat_id': self.chat_id, 'text': text[:4000], 'disable_web_page_preview':'true'}
+        if parse_mode: payload['parse_mode']=parse_mode
+        await asyncio.to_thread(self._post, payload)
 
-    async def send_with_inline(self, text:str, buttons:list[list[tuple[str,str]]]):
+    async def send_with_inline(self, text:str, buttons:list[list[tuple[str,str]]], parse_mode:str|None='Markdown'):
         """buttons: list of rows; each row list of (label, callback_data)."""
         if not self.enabled: return
         markup={"inline_keyboard": [[{"text": b[0], "callback_data": b[1]} for b in row] for row in buttons]}
-        await asyncio.to_thread(self._post, { 'chat_id': self.chat_id, 'text': text[:4000], 'reply_markup': json.dumps(markup), 'disable_web_page_preview':'true'})
+        payload={ 'chat_id': self.chat_id, 'text': text[:4000], 'reply_markup': json.dumps(markup), 'disable_web_page_preview':'true'}
+        if parse_mode: payload['parse_mode']=parse_mode
+        await asyncio.to_thread(self._post, payload)
 
     def _post(self, fields:dict):
         if not self.enabled: return
@@ -115,11 +119,12 @@ class TelegramBotPoller:
         return res.get('result', [])
 
     # ---------------- sending helpers ----------------
-    async def _send(self, text:str, markup:dict|None=None, chat_id:str|None=None):
+    async def _send(self, text:str, markup:dict|None=None, chat_id:str|None=None, parse_mode:str|None='Markdown'):
         chat_id = chat_id or (next(iter(self.admins)) if self.admins else None)
         if not chat_id: return
         data={'chat_id': chat_id, 'text': text[:4000], 'disable_web_page_preview':'true'}
         if markup: data['reply_markup']=json.dumps(markup)
+        if parse_mode: data['parse_mode']=parse_mode
         await asyncio.to_thread(self._api_post,'sendMessage', data)
 
     def _kb(self, rows:list[list[tuple[str,str]]]):
@@ -127,22 +132,23 @@ class TelegramBotPoller:
 
     async def _menu_main(self, chat_id:str):
         cfg=self.load(self.cfg_path)
-        nodes_cnt=len(cfg.get('nodes',[]))
+        nodes=cfg.get('nodes',[])
+        nodes_cnt=len(nodes)
         inb_cnt=len(cfg.get('inbounds_limit',{}))
         banm=cfg.get('ban_minutes')
         cross='فعال' if cfg.get('cross_node_ban',True) else 'غیرفعال'
-        header=(f"منوی اصلی\n"\
-                f"نودها: {nodes_cnt} | این‌باندها: {inb_cnt}\n"\
-                f"ban_minutes: {banm} | cross_node_ban: {cross}\n"\
-                f"مدیریت: دکمه‌ها")
+        up=nodes_cnt  # ساده؛ بعداً می‌توان وضعیت زنده را کش کرد
+        header=(f"*🛡 منوی اصلی Guardian*\n"
+                f"نودها: *{nodes_cnt}* (فعال تقریبی: {up}) | این‌باندها: *{inb_cnt}*\n"
+                f"محرومیت: *{banm}m* | کراس‌نود: *{cross}*\n"
+                f"برای مدیریت از دکمه‌ها استفاده کن:")
         rows=[
-            [("نودها","mn_nodes"),("این‌باندها","mn_inb")],
-            [("سشن‌ها","mn_sessions"),("بن‌شده‌ها","mn_banned")],
-            [("تنظیمات","mn_settings"),("ریفرش","mn_refresh")],
-            [("toggle cross","set_toggle_cross"),("ویرایش ban","set_edit_banmin")],
-            [("ریست سرویس","set_restart")]
+            [("📊 وضعیت","mn_status"),("👥 سشن‌ها","mn_sessions")],
+            [("🧩 نودها","mn_nodes"),("📡 این‌باندها","mn_inb")],
+            [("🚫 IP بن","mn_banned"),("⚙️ تنظیمات","mn_settings")],
+            [("🔁 ریفرش","mn_refresh"),("♻️ ریست سرویس","set_restart")]
         ]
-        await self._send(header, self._kb(rows), chat_id)
+        await self._send(header, self._kb(rows), chat_id=chat_id, parse_mode='Markdown')
 
     # ---------------- update handler ----------------
     async def _handle(self, upd:dict):
@@ -256,6 +262,8 @@ class TelegramBotPoller:
 
     # ---------------- callback handlers ----------------
     async def _handle_callback(self, chat_id:str, data:str):
+        if data=='mn_status':
+            await self._menu_status(chat_id); return
         if data=='mn_refresh':
             await self._menu_main(chat_id); return
         if data=='mn_nodes':
@@ -481,3 +489,12 @@ class TelegramBotPoller:
             await self._send("لیست بن خالی است.", self._kb([[('↩️','mn_refresh')]]), chat_id=chat_id)
         else:
             await self._send("IP های بن شده (برای آنبن بزن):", self._kb(rows), chat_id=chat_id)
+
+    async def _menu_status(self, chat_id:str):
+        cfg=self.load(self.cfg_path)
+        nodes=cfg.get('nodes', [])
+        cross='فعال' if cfg.get('cross_node_ban',True) else 'غیرفعال'
+        lines=["*وضعیت فعلی*", f"کراس‌نود: *{cross}*", f"ban_minutes: *{cfg.get('ban_minutes')}*"]
+        for n in nodes:
+            lines.append(f"• `{n.get('name')}` → {n.get('host')}:{n.get('ssh_port')} cnt={n.get('docker_container')}")
+        await self._send("\n".join(lines), self._kb([[('↩️ برگشت','mn_refresh')]]), chat_id=chat_id, parse_mode='Markdown')
