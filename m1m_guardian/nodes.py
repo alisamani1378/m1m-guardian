@@ -23,18 +23,63 @@ def _ssh_base(spec:NodeSpec)->List[str]:
     if spec.ssh_pass: common = ["sshpass","-p",spec.ssh_pass] + common
     return common
 
+async def _ssh_run_capture(cmd:list[str], timeout:float=15.0):
+    try:
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    except Exception as e:
+        return 997, f"spawn_error: {e}".encode()
+    try:
+        out,_= await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        with contextlib.suppress(Exception): proc.kill()
+        return 998, b'timeout'
+    return proc.returncode, out or b''
+
 async def run_ssh(spec:NodeSpec, remote_cmd:str) -> int:
     cmd = _ssh_base(spec) + [remote_cmd]
     proc = await asyncio.create_subprocess_exec(*cmd)
     return await proc.wait()
 
+async def _diagnose_connectivity(spec:NodeSpec)->bool:
+    """Return True if basic SSH works; logs detailed error otherwise."""
+    sentinel="__M1M_OK__"
+    cmd=_ssh_base(spec)+[f"echo {sentinel}"]
+    rc,out= await _ssh_run_capture(cmd, timeout=10)
+    if rc==0 and sentinel.encode() in out:
+        return True
+    # log condensed diagnostics
+    snippet=out.decode(errors='ignore').strip().splitlines()[-5:]
+    log.error("ssh basic check failed node=%s rc=%s lines=%s", spec.name, rc, '; '.join(snippet) or '<empty>')
+    return False
+
+async def _diagnose_docker(spec:NodeSpec):
+    cmd=_ssh_base(spec)+["sh","-lc","command -v docker >/dev/null 2>&1 || echo __NO_DOCKER__; docker ps --format '{{.Names}}' 2>/dev/null | head -20"]
+    rc,out= await _ssh_run_capture(cmd, timeout=20)
+    text=out.decode(errors='ignore').strip()
+    if rc!=0:
+        log.error("docker check failed node=%s rc=%s out=%s", spec.name, rc, text)
+    else:
+        if "__NO_DOCKER__" in text:
+            log.error("node=%s docker not installed", spec.name)
+        else:
+            log.debug("node=%s docker containers: %s", spec.name, ' '.join(text.split()))
+
 async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
     """Stream xray stdout/stderr via /proc/$pid/fd inside container with auto reattach.
-    Uses only busybox-compatible commands (pgrep optional) to avoid rc=2 failures.
+    Adds: SSH connectivity & docker diagnostics when repeated failures occur.
     """
+    failure_streak=0
     while True:
+        # Pre-check SSH connectivity if prior failures
+        if failure_streak>0:
+            ok = await _diagnose_connectivity(spec)
+            if not ok:
+                failure_streak+=1
+                await asyncio.sleep(min(30, 2*failure_streak))
+                continue
+            # If SSH ok, optionally check docker environment
+            await _diagnose_docker(spec)
         container = shlex.quote(spec.docker_container)
-        # Host-side script builds a stable inner loop inside the container.
         remote_script = (
             "SUDO=\"\"; if [ \"$(id -u)\" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO=\"sudo\"; fi; fi\n"
             "if ! command -v docker >/dev/null 2>&1; then echo '[guardian-stream] no_docker'; exit 41; fi\n"
@@ -47,7 +92,6 @@ async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
             "if ! $SUDO docker inspect \"$TARGET\" >/dev/null 2>&1; then echo '[guardian-stream] no_container'; exit 42; fi\n"
             "echo '[guardian-stream] attach container='$TARGET\n"
             "exec $SUDO docker exec -i \"$TARGET\" sh -c '"
-            # ensure pgrep available (procps) else try install quietly
             "if ! command -v pgrep >/dev/null 2>&1; then (apk add --no-cache procps 2>/dev/null || (apt-get update -y >/dev/null 2>&1 && apt-get install -y procps >/dev/null 2>&1) || yum install -y procps-ng >/dev/null 2>&1 || true); fi; "
             "no_cnt=0; while true; do "
             "if command -v pgrep >/dev/null 2>&1; then pid=$(pgrep -xo xray); else pid=$(ps | grep -i \\bxray\\b | grep -v grep | awk \"{print $1; exit}\"); fi; "
@@ -59,13 +103,21 @@ async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
         )
         cmd = _ssh_base(spec) + ["sh","-lc", remote_script]
         log.debug("starting direct xray stream: node=%s cmd=%s", spec.name, ' '.join(cmd))
-        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        try:
+            proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        except Exception as e:
+            failure_streak+=1
+            log.error("spawn ssh failed node=%s err=%s", spec.name, e)
+            await asyncio.sleep(min(30, 2*failure_streak))
+            continue
         start=time.time()
+        had_output=False
         try:
             assert proc.stdout is not None
             while True:
                 line = await proc.stdout.readline()
                 if not line: break
+                had_output=True
                 text=line.decode('utf-8','ignore').rstrip('\n')
                 if text.startswith('[guardian-stream]'):
                     log.info("node=%s %s", spec.name, text.replace('[guardian-stream] ','').strip())
@@ -76,6 +128,17 @@ async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
             rc=getattr(proc,'returncode',None)
             with contextlib.suppress(Exception):
                 proc.kill(); await proc.wait()
-            log.warning("log stream wrapper ended node=%s rc=%s uptime=%.1fs (restarting in 4s)", spec.name, rc, time.time()-start)
+            uptime=time.time()-start
+            if rc not in (0, None):
+                failure_streak = failure_streak+1 if uptime < 10 else 0
+                if rc==255:
+                    log.error("ssh session ended rc=255 node=%s uptime=%.1fs (auth/network).", spec.name, uptime)
+                else:
+                    log.warning("log stream wrapper ended node=%s rc=%s uptime=%.1fs", spec.name, rc, uptime)
+                if not had_output and uptime < 2:
+                    # immediate failure, run quick docker diag once
+                    await _diagnose_docker(spec)
+            else:
+                failure_streak=0
             yield f"[guardian-stream-exit rc={rc}]"
             await asyncio.sleep(4)
