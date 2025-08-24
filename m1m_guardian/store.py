@@ -34,6 +34,44 @@ class Store:
     async def is_banned_recently(self, ip:str)->bool:
         return await self.r.exists(f"banned:{ip}") == 1
 
+    async def list_active(self, limit:int=200):
+        """Return up to limit entries of (inbound,email,ips:list)."""
+        out=[]
+        cursor=0
+        pattern='a:*'
+        while True:
+            cursor, keys = await self.r.scan(cursor=cursor, match=pattern, count=200)
+            for k in keys:
+                try:
+                    _, inbound, email = k.split(':',2)
+                except ValueError:
+                    continue
+                ips = await self.r.zrange(k,0,-1)
+                out.append((inbound,email,ips))
+                if len(out)>=limit:
+                    return out
+            if cursor==0:
+                break
+        return out
+
+    async def list_banned(self, limit:int=200):
+        out=[]
+        cursor=0
+        while True:
+            cursor, keys = await self.r.scan(cursor=cursor, match='banned:*', count=200)
+            for k in keys:
+                ip=k.split(':',1)[1]
+                ttl=await self.r.ttl(k)
+                out.append((ip, ttl))
+                if len(out)>=limit:
+                    return out
+            if cursor==0:
+                break
+        return out
+
+    async def unmark_banned(self, ip:str):
+        await self.r.delete(f"banned:{ip}")
+
     async def get_all_nodes(self)->list[str]:
         # اختیاری: می‌تواند برای cross-node ban استفاده شود
         return []

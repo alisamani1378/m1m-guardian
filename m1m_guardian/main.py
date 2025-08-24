@@ -41,14 +41,19 @@ async def amain(config_path:str, log_level:str):
     notifier = None
     tcfg = cfg.get("telegram", {})
     poller_task=None
-    if tcfg.get("bot_token") and tcfg.get("chat_id"):
-        notifier = TelegramNotifier(tcfg.get("bot_token"), tcfg.get("chat_id"))
+    if tcfg.get("bot_token") and (tcfg.get("chat_id") or tcfg.get("admins")):
+        # support multiple admins: union of chat_id + admins list
+        extra_admins = []
+        if isinstance(tcfg.get("admins"), list):
+            extra_admins = [str(a) for a in tcfg.get("admins") if a]
+        main_chat = tcfg.get("chat_id") or (extra_admins[0] if extra_admins else None)
+        notifier = TelegramNotifier(tcfg.get("bot_token"), main_chat)
         await notifier.delete_webhook()
         try:
             await notifier.send("m1m-guardian شروع شد ✅")
         except Exception:
             pass
-        poller=TelegramBotPoller(tcfg.get("bot_token"), tcfg.get("chat_id"), config_path, load, save)
+        poller=TelegramBotPoller(tcfg.get("bot_token"), main_chat, config_path, load, save, store=store, nodes=nodes, cross_node_ban=cross, extra_admins=extra_admins)
         poller_task=asyncio.create_task(poller.start())
 
     if not nodes:

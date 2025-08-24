@@ -13,7 +13,10 @@ def ensure_defaults(cfg:dict):
     cfg.setdefault("ban_minutes", 10)
     cfg.setdefault("cross_node_ban", True)
     cfg.setdefault("rejected_threshold", 8)  # new: how many rejected/invalid before ban
-    cfg.setdefault("telegram", {"bot_token":"", "chat_id":""})
+    cfg.setdefault("telegram", {"bot_token":"", "chat_id":"", "admins":[]})
+    # ensure admins list exists if telegram defined previously
+    if isinstance(cfg.get("telegram"), dict) and "admins" not in cfg["telegram"]:
+        cfg["telegram"]["admins"]=[]
     if "ports" not in cfg or cfg["ports"] in (None, ""):
         cfg["ports"] = []  # empty list means no conntrack flush
     if isinstance(cfg.get("ports"), int):

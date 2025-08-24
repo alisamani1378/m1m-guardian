@@ -48,3 +48,18 @@ async def is_banned(spec:NodeSpec, ip:str)->bool:
     p = await asyncio.create_subprocess_exec(*cmd)
     rc = await p.wait()
     return rc==0
+
+async def unban_ip(spec:NodeSpec, ip:str)->bool:
+    """Remove IP from ipset (if present) and flush its conntrack entries. Returns True if deletion attempted."""
+    del_cmd = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
+(command -v ipset >/dev/null 2>&1) || exit 0
+$SUDO ipset del {SET_NAME} {shlex.quote(ip)} 2>/dev/null || true
+{_cmd_flush_all(ip)}
+true'''
+    cmd = _ssh_base(spec)+[del_cmd]
+    try:
+        p=await asyncio.create_subprocess_exec(*cmd)
+        await p.wait()
+        return True
+    except Exception:
+        return False
