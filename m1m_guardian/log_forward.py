@@ -82,7 +82,7 @@ class TelegramLogHandler(logging.Handler):
                     usr=rest
             inb=m_inb.group(1) if m_inb else '?'
             dur=m_dur.group(1) if m_dur else ''
-            return f"🚫 IP {ip} بن شد روی نود {node} {('برای '+dur) if dur else ''}\nکاربر: {usr}\nایnbاند: {inb}"
+            return f"🚫 IP {ip} بن شد روی نود {node} {('برای '+dur) if dur else ''}\nکاربر: {usr}\nاینباند: {inb}"
         if "banned ip=" in low:
             # summary multi-node ban already has its own custom notifier; skip to prevent duplicate
             return None

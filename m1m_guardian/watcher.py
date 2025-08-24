@@ -85,11 +85,12 @@ class NodeWatcher:
                                 display_email=rest
                         # single notifier message
                         if success_nodes:
-                            msg = (f"IP {old_ip} banned on {', '.join(success_nodes)} for {self.ban_minutes}m\n"
-                                   f"user: {display_email}\n"
-                                   f"inbound: {inbound}")
+                            nodes_list = ', '.join(success_nodes)
+                            msg = (f"🚫 IP {old_ip} روی نودهای: {nodes_list} به مدت {self.ban_minutes} دقیقه بن شد\n"
+                                   f"کاربر: `{display_email}`\n"
+                                   f"اینباند: {inbound}")
                             if failed_nodes:
-                                msg += f"\nFailed nodes: {', '.join(failed_nodes)}"
+                                msg += f"\nنودهای ناموفق: {', '.join(failed_nodes)}"
                             await self._notify(msg)
                 log.warning("log stream ended for %s, reconnecting...", self.spec.name)
             except Exception as e:
