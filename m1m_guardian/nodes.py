@@ -67,12 +67,12 @@ async def _diagnose_docker(spec:NodeSpec):
 
 async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
     """Stream xray stdout/stderr via /proc/$pid/fd inside container with auto reattach.
-    Adds: SSH connectivity & docker diagnostics when repeated failures occur.
-    Plus: fallback به docker logs اگر چند بار fd_unreadable رخ دهد.
+    Retains SSH/docker diagnostics; removes docker logs fallback (همیشه روش قبلی).
+    On repeated fd_unreadable prints periodic diagnostics instead of switching.
     """
     failure_streak=0
     fd_unreadable_count=0
-    fallback_mode=False  # when True use docker logs -f
+    last_diag_time=0.0
     while True:
         # Pre-check SSH connectivity if prior failures
         if failure_streak>0:
@@ -84,39 +84,29 @@ async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
             # If SSH ok, optionally check docker environment
             await _diagnose_docker(spec)
         container = shlex.quote(spec.docker_container)
-        if not fallback_mode:
-            remote_script = (
-                "SUDO=\"\"; if [ \"$(id -u)\" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO=\"sudo\"; fi; fi\n"
-                "if ! command -v docker >/dev/null 2>&1; then echo '[guardian-stream] no_docker'; exit 41; fi\n"
-                f"TARGET={container}\n"
-                "if ! $SUDO docker inspect \"$TARGET\" >/dev/null 2>&1; then\n"
-                "  for c in $($SUDO docker ps --format '{{.Names}}' 2>/dev/null); do\n"
-                "    if $SUDO docker exec \"$c\" sh -lc 'command -v pgrep >/dev/null 2>&1 && pgrep -xo xray >/dev/null 2>&1 || ps | grep -i \\bxray\\b | grep -v grep >/dev/null 2>&1'; then TARGET=\"$c\"; break; fi\n"
-                "  done\n"
-                "fi\n"
-                "if ! $SUDO docker inspect \"$TARGET\" >/dev/null 2>&1; then echo '[guardian-stream] no_container'; exit 42; fi\n"
-                "echo '[guardian-stream] attach container='$TARGET\n"
-                "exec $SUDO docker exec -i \"$TARGET\" sh -c '"
-                "if ! command -v pgrep >/dev/null 2>&1; then (apk add --no-cache procps 2>/dev/null || (apt-get update -y >/dev/null 2>&1 && apt-get install -y procps >/dev/null 2>&1) || yum install -y procps-ng >/dev/null 2>&1 || true); fi; "
-                "while true; do "
-                "if command -v pgrep >/dev/null 2>&1; then pid=$(pgrep -xo xray); else pid=$(ps | grep -i \\bxray\\b | grep -v grep | awk \"{print $1; exit}\"); fi; "
-                "if [ -z \"$pid\" ]; then echo \"[guardian-stream] no_xray_process\"; sleep 2; continue; fi; "
-                "if [ ! -r /proc/$pid/fd/1 ]; then echo \"[guardian-stream] fd_unreadable pid=$pid\"; sleep 2; continue; fi; "
-                "echo \"[guardian-stream] follow pid=$pid\"; "
-                "cat /proc/$pid/fd/1 /proc/$pid/fd/2 2>/dev/null || true; "
-                "sleep 1; done'"
-            )
-        else:
-            remote_script=(
-                "SUDO=\"\"; if [ \"$(id -u)\" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO=\"sudo\"; fi; fi\n"
-                "if ! command -v docker >/dev/null 2>&1; then echo '[guardian-stream] no_docker'; exit 41; fi\n"
-                f"TARGET={container}\n"
-                "if ! $SUDO docker inspect \"$TARGET\" >/dev/null 2>&1; then echo '[guardian-stream] no_container'; exit 42; fi\n"
-                "echo '[guardian-stream] attach container='$TARGET' (docker logs fallback)'\n"
-                "exec $SUDO docker logs -f --tail=50 \"$TARGET\" 2>&1"
-            )
+        remote_script = (
+            "SUDO=\"\"; if [ \"$(id -u)\" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO=\"sudo\"; fi; fi\n"
+            "if ! command -v docker >/dev/null 2>&1; then echo '[guardian-stream] no_docker'; exit 41; fi\n"
+            f"TARGET={container}\n"
+            "if ! $SUDO docker inspect \"$TARGET\" >/dev/null 2>&1; then\n"
+            "  for c in $($SUDO docker ps --format '{{.Names}}' 2>/dev/null); do\n"
+            "    if $SUDO docker exec \"$c\" sh -lc 'command -v pgrep >/dev/null 2>&1 && pgrep -xo xray >/dev/null 2>&1 || ps | grep -i \\bxray\\b | grep -v grep >/dev/null 2>&1'; then TARGET=\"$c\"; break; fi\n"
+            "  done\n"
+            "fi\n"
+            "if ! $SUDO docker inspect \"$TARGET\" >/dev/null 2>&1; then echo '[guardian-stream] no_container'; exit 42; fi\n"
+            "echo '[guardian-stream] attach container='$TARGET\n"
+            "exec $SUDO docker exec -i \"$TARGET\" sh -c '"
+            "if ! command -v pgrep >/dev/null 2>&1; then (apk add --no-cache procps 2>/dev/null || (apt-get update -y >/dev/null 2>&1 && apt-get install -y procps >/dev/null 2>&1) || yum install -y procps-ng >/dev/null 2>&1 || true); fi; "
+            "while true; do "
+            "if command -v pgrep >/dev/null 2>&1; then pid=$(pgrep -xo xray); else pid=$(ps | grep -i \\bxray\\b | grep -v grep | awk \"{print $1; exit}\"); fi; "
+            "if [ -z \"$pid\" ]; then echo \"[guardian-stream] no_xray_process\"; sleep 2; continue; fi; "
+            "if [ ! -r /proc/$pid/fd/1 ]; then echo \"[guardian-stream] fd_unreadable pid=$pid\"; sleep 2; continue; fi; "
+            "echo \"[guardian-stream] follow pid=$pid\"; "
+            "cat /proc/$pid/fd/1 /proc/$pid/fd/2 2>/dev/null || true; "
+            "sleep 1; done'"
+        )
         cmd = _ssh_base(spec) + ["sh","-lc", remote_script]
-        log.debug("starting %s stream: node=%s cmd=%s", 'fallback' if fallback_mode else 'direct', spec.name, ' '.join(cmd))
+        log.debug("starting direct stream (no-fallback) node=%s cmd=%s", spec.name, ' '.join(cmd))
         try:
             proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         except Exception as e:
@@ -124,45 +114,37 @@ async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
             log.error("spawn ssh failed node=%s err=%s", spec.name, e)
             await asyncio.sleep(min(30, 2*failure_streak))
             continue
-        start=time.time()
-        had_output=False
+        start=time.time(); had_output=False
         try:
             assert proc.stdout is not None
             while True:
-                line = await proc.stdout.readline()
+                line=await proc.stdout.readline()
                 if not line: break
                 had_output=True
                 text=line.decode('utf-8','ignore').rstrip('\n')
                 if text.startswith('[guardian-stream]'):
-                    # special control messages
                     msg=text.replace('[guardian-stream]','').strip()
-                    if 'fd_unreadable' in msg and not fallback_mode:
+                    if 'fd_unreadable' in msg:
                         fd_unreadable_count+=1
-                        log.info("node=%s %s", spec.name, msg)
-                        if fd_unreadable_count==5:
-                            log.warning("node=%s switching to docker logs fallback due to repeated fd_unreadable", spec.name)
-                            yield '[guardian-stream] switching to docker logs fallback'
-                            fallback_mode=True
-                            # restart outer loop to attach docker logs
-                            break
-                    else:
-                        if 'follow pid=' in msg:
-                            fd_unreadable_count=0  # reset if we successfully attach
-                        log.info("node=%s %s", spec.name, msg)
+                        # هر چند بار، دیاگ مختصر
+                        if fd_unreadable_count in (5,15,30) and (time.time()-last_diag_time>10):
+                            last_diag_time=time.time()
+                            # یک فرمان تشخیصی جدا برای گزارش سطح دسترسی FD
+                            diag_cmd=_ssh_base(spec)+["sh","-lc", "pid=$(pgrep -xo xray || ps | grep -i \\bxray\\b | grep -v grep | awk '{print $1;exit}'); if [ -n \"$pid\" ]; then echo '[guardian-diag] ls_fd:'; ls -l /proc/$pid/fd 2>/dev/null | head -20; echo '[guardian-diag] stat_fd1:'; stat /proc/$pid/fd/1 2>/dev/null || true; fi"]
+                            rc,out=await _ssh_run_capture(diag_cmd, timeout=8)
+                            log.warning("node=%s fd_unreadable diagnostics rc=%s out=%s", spec.name, rc, out.decode(errors='ignore').strip())
+                    elif 'follow pid=' in msg:
+                        fd_unreadable_count=0
+                    log.info("node=%s %s", spec.name, msg)
                     yield text
                 else:
-                    # normal log line from xray or docker logs
                     log.debug("node=%s raw-log: %s", spec.name, text)
                     yield text
         finally:
             rc=getattr(proc,'returncode',None)
-            with contextlib.suppress(Exception):
-                proc.kill(); await proc.wait()
+            with contextlib.suppress(Exception): proc.kill(); await proc.wait()
             uptime=time.time()-start
-            if fallback_mode and fd_unreadable_count<5:
-                # if we were in fallback but later direct became readable we could revert (optional)
-                pass
-            if rc not in (0, None):
+            if rc not in (0,None):
                 failure_streak = failure_streak+1 if uptime < 10 else 0
                 if rc==255:
                     log.error("ssh session ended rc=255 node=%s uptime=%.1fs (auth/network).", spec.name, uptime)
