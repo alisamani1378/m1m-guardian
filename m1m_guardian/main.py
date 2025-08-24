@@ -4,6 +4,7 @@ from .store import Store
 from .nodes import NodeSpec
 from .watcher import NodeWatcher
 from .notify import TelegramNotifier, TelegramBotPoller
+from .log_forward import install_telegram_log_forward
 
 def setup_logging(level:str="INFO"):
     h = logging.StreamHandler(sys.stdout)
@@ -55,6 +56,8 @@ async def amain(config_path:str, log_level:str):
             pass
         poller=TelegramBotPoller(tcfg.get("bot_token"), main_chat, config_path, load, save, store=store, nodes=nodes, cross_node_ban=cross, extra_admins=extra_admins)
         poller_task=asyncio.create_task(poller.start())
+        # نصب فورواردر لاگ برای ارسال خطاهای نود به تلگرام
+        install_telegram_log_forward(notifier, min_interval=20.0)
 
     if not nodes:
         logging.error("No nodes configured. Use auto.sh -> option 2 (Config menu) to add a node.")
