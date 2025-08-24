@@ -30,14 +30,13 @@ async def amain(config_path:str, log_level:str):
     setup_logging(log_level)
     cfg = load(config_path); ensure_defaults(cfg)
     logging.getLogger("guardian.start").info(
-        "config loaded: nodes=%d ban_minutes=%s cross_node_ban=%s",
-        len(cfg.get("nodes",[])), cfg.get("ban_minutes"), cfg.get("cross_node_ban")
+        "config loaded: nodes=%d ban_minutes=%s",
+        len(cfg.get("nodes",[])), cfg.get("ban_minutes")
     )
     store = Store(cfg["redis"]["url"])
     nodes = make_nodes(cfg)
     limits = cfg.get("inbounds_limit", {})
     ban_minutes = int(cfg.get("ban_minutes",10))
-    cross = bool(cfg.get("cross_node_ban", True))
 
     notifier = None
     tcfg = cfg.get("telegram", {})
@@ -54,7 +53,7 @@ async def amain(config_path:str, log_level:str):
             await notifier.send("m1m-guardian شروع شد ✅")
         except Exception:
             pass
-        poller=TelegramBotPoller(tcfg.get("bot_token"), main_chat, config_path, load, save, store=store, nodes=nodes, cross_node_ban=cross, extra_admins=extra_admins)
+        poller=TelegramBotPoller(tcfg.get("bot_token"), main_chat, config_path, load, save, store=store, nodes=nodes, extra_admins=extra_admins)
         poller_task=asyncio.create_task(poller.start())
         # نصب فورواردر لاگ برای ارسال خطاهای نود به تلگرام
         install_telegram_log_forward(notifier, min_interval=20.0)
@@ -66,7 +65,7 @@ async def amain(config_path:str, log_level:str):
     watchers=[]
     for spec in nodes:
         logging.getLogger("guardian.start").debug("starting watcher for node=%s host=%s", spec.name, spec.host)
-        watchers.append(NodeWatcher(spec, store, limits, ban_minutes, nodes, cross, notifier).run())
+        watchers.append(NodeWatcher(spec, store, limits, ban_minutes, nodes, notifier).run())
 
     logging.info("Starting %d node watchers...", len(watchers))
     await asyncio.gather(*watchers, *( [poller_task] if poller_task else [] ))

@@ -54,17 +54,10 @@ class TelegramNotifier:
             log.debug("deleteWebhook failed: %s", e)
 
 class TelegramBotPoller:
-    """Inline keyboard management bot (Persian UI) + مدیریت سشن و بن.
-    قابلیت‌ها:
-      - منوی اصلی، نودها، این‌باندها، تنظیمات
-      - سشن‌های فعال (کاربر/اینباند و IP ها) با دکمه جزئیات
-      - لیست IP های بن شده + آنبن با تایید
-      - چند ادمین (telegram.admins لیست یا chat_id تکی)
-    """
-    def __init__(self, bot_token:str, admin_chat_id:str|None, config_path:str, load_fn, save_fn, store=None, nodes:List[NodeSpec]|None=None, cross_node_ban:bool=True, extra_admins:List[str]|None=None):
+    """Telegram management bot (simplified)."""
+    def __init__(self, bot_token:str, admin_chat_id:str|None, config_path:str, load_fn, save_fn, store=None, nodes:List[NodeSpec]|None=None, extra_admins:List[str]|None=None):
         self.token=bot_token; self.cfg_path=config_path
         self.load=load_fn; self.save=save_fn; self.offset=0; self.running=True
-        # admins
         admins=set()
         if admin_chat_id: admins.add(str(admin_chat_id))
         if extra_admins:
@@ -74,12 +67,9 @@ class TelegramBotPoller:
         self.state:dict[str,dict]={}
         self.store=store
         self.nodes=nodes or []
-        self.cross=cross_node_ban
-        # caches
-        self.session_cache:Dict[str,Tuple[str,str,List[str]]]={}  # sid -> (inbound,email,ips)
-        self.banned_cache:Dict[str,int]={}  # ip -> ttl
-        self._last_restart_ts=0.0  # cooldown tracking
-        # persistent offset file
+        self.session_cache:Dict[str,Tuple[str,str,List[str]]]={}
+        self.banned_cache:Dict[str,int]={}
+        self._last_restart_ts=0.0
         cfg_dir=os.path.dirname(self.cfg_path) or '/etc/m1m-guardian'
         os.makedirs(cfg_dir, exist_ok=True)
         self.offset_file=os.path.join(cfg_dir, 'telegram.offset')
@@ -133,20 +123,12 @@ class TelegramBotPoller:
     async def _menu_main(self, chat_id:str):
         cfg=self.load(self.cfg_path)
         nodes=cfg.get('nodes',[])
-        nodes_cnt=len(nodes)
-        inb_cnt=len(cfg.get('inbounds_limit',{}))
-        banm=cfg.get('ban_minutes')
-        cross='فعال' if cfg.get('cross_node_ban',True) else 'غیرفعال'
-        up=nodes_cnt  # ساده؛ بعداً می‌توان وضعیت زنده را کش کرد
-        header=(f"*🛡 منوی اصلی Guardian*\n"
-                f"نودها: *{nodes_cnt}* (فعال تقریبی: {up}) | این‌باندها: *{inb_cnt}*\n"
-                f"محرومیت: *{banm}m* | کراس‌نود: *{cross}*\n"
-                f"برای مدیریت از دکمه‌ها استفاده کن:")
+        header=(f"*🛡 Guardian*")
         rows=[
             [("📊 وضعیت","mn_status"),("👥 سشن‌ها","mn_sessions")],
             [("🧩 نودها","mn_nodes"),("📡 این‌باندها","mn_inb")],
             [("🚫 IP بن","mn_banned"),("⚙️ تنظیمات","mn_settings")],
-            [("🔁 ریفرش","mn_refresh"),("♻️ ریست سرویس","set_restart")]
+            [("🔁 ریفرش","mn_refresh"),("♻️ ریست","set_restart")]
         ]
         await self._send(header, self._kb(rows), chat_id=chat_id, parse_mode='Markdown')
 
@@ -346,10 +328,6 @@ class TelegramBotPoller:
             await self._send(f"آنبن IP {ip}?", self._kb([[('✅ بله','unbanconfirm:'+ip),("❌ خیر","mn_banned")]]), chat_id=chat_id)
             return
         # settings
-        if data=='set_toggle_cross':
-            cfg=self.load(self.cfg_path)
-            cfg['cross_node_ban']=not bool(cfg.get('cross_node_ban',True)); self.save(self.cfg_path,cfg)
-            await self._menu_settings(chat_id); return
         if data=='set_edit_banmin':
             self.state[chat_id]={'kind':'edit_setting_banmin'}
             await self._send("عدد جدید ban_minutes را بفرست:", chat_id=chat_id)
@@ -454,10 +432,9 @@ class TelegramBotPoller:
 
     async def _menu_settings(self, chat_id:str):
         cfg=self.load(self.cfg_path)
-        cross='فعال' if cfg.get('cross_node_ban',True) else 'غیرفعال'
         banm=cfg.get('ban_minutes')
-        rows=[[('toggle cross','set_toggle_cross'),('ban_minutes','set_edit_banmin')],[('ریست سرویس','set_restart'),('↩️ برگشت','mn_refresh')]]
-        await self._send(f"تنظیمات:\ncross_node_ban: {cross}\nban_minutes: {banm}\n(برای اعمال تغییرات، ریست)", self._kb(rows), chat_id=chat_id)
+        rows=[[('ویرایش ban_minutes','set_edit_banmin'),('ریست سرویس','set_restart')],[('↩️ برگشت','mn_refresh')]]
+        await self._send(f"تنظیمات:\nban_minutes: {banm}", self._kb(rows), chat_id=chat_id)
 
     async def _menu_sessions(self, chat_id:str):
         if not self.store:
@@ -493,8 +470,7 @@ class TelegramBotPoller:
     async def _menu_status(self, chat_id:str):
         cfg=self.load(self.cfg_path)
         nodes=cfg.get('nodes', [])
-        cross='فعال' if cfg.get('cross_node_ban',True) else 'غیرفعال'
-        lines=["*وضعیت فعلی*", f"کراس‌نود: *{cross}*", f"ban_minutes: *{cfg.get('ban_minutes')}*"]
+        lines=["*وضعیت فعلی*", f"ban_minutes: *{cfg.get('ban_minutes')}*"]
         for n in nodes:
             lines.append(f"• `{n.get('name')}` → {n.get('host')}:{n.get('ssh_port')} cnt={n.get('docker_container')}")
         await self._send("\n".join(lines), self._kb([[('↩️ برگشت','mn_refresh')]]), chat_id=chat_id, parse_mode='Markdown')

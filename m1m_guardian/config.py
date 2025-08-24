@@ -11,16 +11,16 @@ def save(path:str, data:dict):
 def ensure_defaults(cfg:dict):
     cfg.setdefault("redis", {"url":"redis://127.0.0.1:6379/0"})
     cfg.setdefault("ban_minutes", 10)
-    cfg.setdefault("cross_node_ban", True)
-    cfg.setdefault("rejected_threshold", 8)  # new: how many rejected/invalid before ban
+    # remove legacy keys if present
+    cfg.pop('cross_node_ban', None)
+    cfg.pop('rejected_threshold', None)
+    cfg.pop('fallback_limit', None)
+    # telegram
     cfg.setdefault("telegram", {"bot_token":"", "chat_id":"", "admins":[]})
-    # ensure admins list exists if telegram defined previously
     if isinstance(cfg.get("telegram"), dict) and "admins" not in cfg["telegram"]:
         cfg["telegram"]["admins"]=[]
-    if "ports" not in cfg or cfg["ports"] in (None, ""):
-        cfg["ports"] = []  # empty list means no conntrack flush
-    if isinstance(cfg.get("ports"), int):
-        cfg["ports"]= [cfg["ports"]]
+    # remove ports feature (always ignore)
+    if 'ports' in cfg: cfg.pop('ports', None)
     cfg.setdefault("inbounds_limit", {})
     if not isinstance(cfg.get("nodes"), list):
         cfg["nodes"]=[]
@@ -122,11 +122,6 @@ def remove_node(path):
 
 def edit_limits(path):
     cfg=load(path); ensure_defaults(cfg)
-    # Auto-migrate legacy default each call
-    if "default" in cfg["inbounds_limit"]:
-        cfg["fallback_limit"] = int(cfg["inbounds_limit"]["default"]) if "fallback_limit" not in cfg else cfg["fallback_limit"]
-        del cfg["inbounds_limit"]["default"]
-        save(path,cfg)
     print("Current inbound limits:", cfg["inbounds_limit"])
     print("Instructions: a) add/update inbound, d) delete inbound, done to finish.")
     while True:
@@ -243,35 +238,6 @@ def manage_limits(path):
         else: print("Bad choice")
 
 
-def manage_ports(path):
-    while True:
-        cfg=load(path); ensure_defaults(cfg)
-        cur=cfg.get("ports", [])
-        print("\n=== Conntrack Flush Ports ===")
-        print("Current:", cur)
-        print("Modes: 1) Flush ALL ('*')  2) Custom list  3) Disable flush  b) Back")
-        c=input("> ").strip().lower()
-        if c=='b': break
-        elif c=='1':
-            cfg['ports']=["*"]
-            save(path,cfg); print("[ok] set to all ports (*).")
-        elif c=='2':
-            raw=prompt("Enter ports (comma/space separated)").replace(',', ' ')
-            ports=[]
-            for token in raw.split():
-                if token.isdigit():
-                    p=int(token)
-                    if 1<=p<=65535: ports.append(p)
-            if not ports:
-                print("No valid ports parsed.")
-            else:
-                cfg['ports']=ports; save(path,cfg); print(f"[ok] set ports={ports}")
-        elif c=='3':
-            cfg['ports']=[]; save(path,cfg); print("[ok] disabled conntrack flush (existing connections linger).")
-        else:
-            print("Bad choice")
-
-
 def manage_telegram(path):
     cfg=load(path); ensure_defaults(cfg)
     cur=cfg.get("telegram", {})
@@ -300,21 +266,18 @@ def interactive_menu(path):
     save(path,cfg)
     while True:
         cfg=load(path); ensure_defaults(cfg)
-        print("\n=== m1m-guardian Config Menu ===")
-        print(f"Ports: {cfg.get('ports')}  (Only defined inbounds are enforced)  rejected_threshold={cfg.get('rejected_threshold')}")
+        print("\n=== m1m-guardian Config Menu (minimal) ===")
         print("1) Show config")
         print("2) Manage nodes")
         print("3) Manage inbound limits")
-        print("4) Manage ports (conntrack flush)")
-        print("5) Telegram settings")
+        print("4) Telegram settings")
         print("0) Exit")
         c=input("> ").strip()
         if c=='0': break
         elif c=='1': show(path)
         elif c=='2': manage_nodes(path)
-        elif c=='3': manage_limits(path)
-        elif c=='4': manage_ports(path)
-        elif c=='5': manage_telegram(path)
+        elif c=='3': edit_limits(path)
+        elif c=='4': manage_telegram(path)
         else: print("Bad choice")
 
 def main():
