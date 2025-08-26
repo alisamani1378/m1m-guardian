@@ -191,6 +191,18 @@ async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
                     log.info("node=%s %s", spec.name, msg)
                     yield text
                 else:
+                    # Detect host key mismatch in raw ssh output (before our diagnostics)
+                    if 'REMOTE HOST IDENTIFICATION HAS CHANGED' in text and spec.host not in _hostkey_cleared:
+                        fp_match=re.search(r"SHA256:[A-Za-z0-9+/=]+", text)
+                        fingerprint=fp_match.group(0) if fp_match else 'unknown'
+                        log.warning("hostkey rotated node=%s host=%s fingerprint=%s action=detected(stream)", spec.name, spec.host, fingerprint)
+                        ok = await _remove_known_host(spec.host)
+                        _hostkey_cleared.add(spec.host)
+                        if ok:
+                            log.info("hostkey rotated node=%s host=%s fingerprint=%s action=auto-cleared(stream) status=will-retry", spec.name, spec.host, fingerprint)
+                            break  # break current stream to retry quickly
+                        else:
+                            log.error("hostkey rotated node=%s host=%s fingerprint=%s action=remove_failed(stream)", spec.name, spec.host, fingerprint)
                     log.debug("node=%s raw-log: %s", spec.name, text)
                     yield text
         finally:
