@@ -254,7 +254,7 @@ class TelegramBotPoller:
                     elif st.get('auth')=='keytext':
                         # ذخیره متن کلید در فایل امن
                         try:
-                            import os, stat
+                            # removed inner 'import os, stat' to avoid overshadowing global os
                             keys_dir='/etc/m1m-guardian/keys'
                             os.makedirs(keys_dir, exist_ok=True)
                             safe_name=collecting.get('name','node')
