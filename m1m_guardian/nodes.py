@@ -2,8 +2,12 @@ import asyncio, shlex
 import contextlib
 from typing import List, AsyncIterator
 import logging, time
+import os
+import re
 
 log = logging.getLogger("guardian.nodes")
+# Track hosts whose host key mismatch we already auto-cleared (avoid loops)
+_hostkey_cleared:set[str] = set()
 
 class NodeSpec:
     def __init__(self, name, host, ssh_user, ssh_port, docker_container, ssh_key=None, ssh_pass=None):
@@ -36,20 +40,69 @@ async def _ssh_run_capture(cmd:list[str], timeout:float=15.0):
         return 998, b'timeout'
     return proc.returncode, out or b''
 
+async def _remove_known_host(host:str):
+    """Remove host key entry so new key is accepted. Returns True if removal ran."""
+    try:
+        # ssh-keygen -R handles hashed/normal entries
+        proc = await asyncio.create_subprocess_exec('ssh-keygen','-R',host, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        await proc.communicate()
+        # Also remove possible duplicated entries with sed (best-effort)
+        known = '/root/.ssh/known_hosts'
+        if host and os.path.isfile(known):
+            try:
+                lines=[]
+                import re
+                pattern=re.compile(rf"(^|,){re.escape(host)}(,|\s)")
+                with open(known,'r',encoding='utf-8',errors='ignore') as f: # type: ignore
+                    for line in f:
+                        if pattern.search(line):
+                            continue
+                        lines.append(line)
+                with open(known,'w',encoding='utf-8') as f:
+                    f.writelines(lines)
+            except Exception:
+                pass
+        return True
+    except Exception:
+        return False
+
 async def run_ssh(spec:NodeSpec, remote_cmd:str) -> int:
     cmd = _ssh_base(spec) + [remote_cmd]
     proc = await asyncio.create_subprocess_exec(*cmd)
     return await proc.wait()
 
 async def _diagnose_connectivity(spec:NodeSpec)->bool:
-    """Return True if basic SSH works; logs detailed error otherwise."""
+    """Return True if basic SSH works; logs detailed error otherwise.
+    Auto handles host key change by clearing known_hosts once.
+    """
     sentinel="__M1M_OK__"
     cmd=_ssh_base(spec)+[f"echo {sentinel}"]
     rc,out= await _ssh_run_capture(cmd, timeout=10)
     if rc==0 and sentinel.encode() in out:
         return True
+    text = out.decode(errors='ignore')
+    # Extract fingerprint if present
+    fp_match=re.search(r"SHA256:[A-Za-z0-9+/=]+", text)
+    fingerprint=fp_match.group(0) if fp_match else 'unknown'
+    mismatch = 'REMOTE HOST IDENTIFICATION HAS CHANGED' in text or 'IDENTIFICATION HAS CHANGED' in text
+    if mismatch:
+        if spec.host not in _hostkey_cleared:
+            log.warning("hostkey rotated node=%s host=%s fingerprint=%s action=detected", spec.name, spec.host, fingerprint)
+            ok = await _remove_known_host(spec.host)
+            _hostkey_cleared.add(spec.host)
+            if ok:
+                rc2,out2 = await _ssh_run_capture(cmd, timeout=10)
+                if rc2==0 and sentinel.encode() in out2:
+                    log.info("hostkey rotated node=%s host=%s fingerprint=%s action=auto-cleared status=accepted", spec.name, spec.host, fingerprint)
+                    return True
+                else:
+                    log.error("hostkey rotated node=%s host=%s fingerprint=%s action=auto-cleared status=retry_failed rc=%s", spec.name, spec.host, fingerprint, rc2)
+            else:
+                log.error("hostkey rotated node=%s host=%s fingerprint=%s action=remove_failed", spec.name, spec.host, fingerprint)
+            # do not proceed further; return False to allow backoff
+            return False
     # log condensed diagnostics
-    snippet=out.decode(errors='ignore').strip().splitlines()[-5:]
+    snippet=text.strip().splitlines()[-8:]
     log.error("ssh basic check failed node=%s rc=%s lines=%s", spec.name, rc, '; '.join(snippet) or '<empty>')
     return False
 

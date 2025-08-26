@@ -16,7 +16,8 @@ KEYWORDS = (
     "ensured firewall",
     "banned old ip=",
     "fd_unreadable",
-    "switching to docker logs fallback"
+    "switching to docker logs fallback",
+    "hostkey rotated"
 )
 # خطوط info غیر بحرانی که نمی خواهیم ارسال کنیم (کاهش نویز)
 SKIP_KEYWORDS = {"ensured firewall", "attached and streaming logs", "follow pid="}
@@ -82,10 +83,30 @@ class TelegramLogHandler(logging.Handler):
                     usr=rest
             inb=m_inb.group(1) if m_inb else '?'
             dur=m_dur.group(1) if m_dur else ''
-            return f"🚫 IP {ip} بن شد روی نود {node} {('برای '+dur) if dur else ''}\nکاربر: {usr}\nاینباند: {inb}"
+            return f"🚫 IP {ip} بن شد روی نود {node} {('برای '+dur) if dur else ''}\nکاربر: {usr}\nایnbاند: {inb}"
         if "banned ip=" in low:
             # summary multi-node ban already has its own custom notifier; skip to prevent duplicate
             return None
+        if "hostkey rotated" in low:
+            # patterns we log: hostkey rotated node=X host=H fingerprint=F action=detected|auto-cleared status=accepted|retry_failed|remove_failed rc=?
+            import re
+            host=re.search(r"host=([^\s]+)", raw)
+            fp=re.search(r"fingerprint=([^\s]+)", raw)
+            act=re.search(r"action=([^\s]+)", raw)
+            status=re.search(r"status=([^\s]+)", raw)
+            action=act.group(1) if act else '?'
+            fingerprint=fp.group(1) if fp else '?'
+            st=status.group(1) if status else ''
+            if action=='detected':
+                return f"⚠️ نود {node}: تغییر کلید SSH شناسایی شد.\nFingerprint جدید: {fingerprint}\nدر حال پاکسازی ورودی قدیمی..."
+            if action=='auto-cleared' and st=='accepted':
+                return f"✅ نود {node}: کلید جدید SSH (fingerprint: {fingerprint}) پذیرفته شد."
+            if action=='auto-cleared' and st=='retry_failed':
+                return f"❌ نود {node}: تلاش برای پذیرش کلید جدید SSH (fingerprint: {fingerprint}) بعد از پاکسازی شکست خورد. اتصال را دستی بررسی کن."
+            if action=='remove_failed':
+                return f"❌ نود {node}: حذف کلید قدیمی SSH برای پذیرش fingerprint جدید ({fingerprint}) ناموفق بود. به صورت دستی ssh-keygen -R اجرا کن."
+            # fallback generic
+            return f"⚠️ نود {node}: تغییر کلید SSH."
         # default for warnings/errors
         if record.levelno >= logging.WARNING:
             return f"⚠️ نود {node}: {raw}"
