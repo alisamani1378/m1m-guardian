@@ -1,7 +1,7 @@
 import asyncio, json, logging, urllib.request, urllib.parse
 import os, time
 from typing import List, Dict, Tuple
-from .firewall import unban_ip, ensure_rule
+from .firewall import unban_ip  # removed ensure_rule unused
 from .nodes import NodeSpec
 
 log = logging.getLogger("guardian.notify")
@@ -75,6 +75,7 @@ class TelegramBotPoller:
         self.offset_file=os.path.join(cfg_dir, 'telegram.offset')
         self._load_offset()
         self._pending_post_add:dict[str,float]={}
+        self._last_update_ts=0.0  # cooldown for update
 
     # ---------------- core polling ----------------
     async def start(self):
@@ -129,6 +130,7 @@ class TelegramBotPoller:
             [("📊 وضعیت","mn_status"),("👥 سشن‌ها","mn_sessions")],
             [("🧩 نودها","mn_nodes"),("📡 این‌باندها","mn_inb")],
             [("🚫 IP بن","mn_banned"),("⚙️ تنظیمات","mn_settings")],
+            [("🆕 آپدیت","set_update")],
             [("🔁 ریفرش","mn_refresh"),("♻️ ریست","set_restart")]
         ]
         await self._send(header, self._kb(rows), chat_id=chat_id, parse_mode='Markdown')
@@ -173,6 +175,28 @@ class TelegramBotPoller:
                         node[field]=text
                     self.save(self.cfg_path,cfg)
                     await self._send(f"بروزرسانی شد: {node_name}.{field}", chat_id=chat_id)
+                self.state.pop(chat_id,None)
+                await self._show_node(node_name, chat_id)
+            elif kind=='edit_node_keytext':
+                node_name=st['node']
+                node=self._find_node(cfg,node_name)
+                if not node:
+                    await self._send("نود یافت نشد", chat_id=chat_id)
+                else:
+                    try:
+                        keys_dir='/etc/m1m-guardian/keys'
+                        os.makedirs(keys_dir, exist_ok=True)
+                        fname=os.path.join(keys_dir, f"{node_name}.key")
+                        with open(fname,'w',encoding='utf-8') as f:
+                            f.write(text.strip()+('\n' if not text.endswith('\n') else ''))
+                        try: os.chmod(fname,0o600)
+                        except Exception: pass
+                        node.pop('ssh_pass', None)
+                        node['ssh_key']=fname
+                        self.save(self.cfg_path,cfg)
+                        await self._send(f"کلید جدید برای {node_name} ذخیره شد.", chat_id=chat_id)
+                    except Exception as e:
+                        await self._send(f"خطا در ذخیره کلید: {e}", chat_id=chat_id)
                 self.state.pop(chat_id,None)
                 await self._show_node(node_name, chat_id)
             elif kind=='set_inbound_limit':
@@ -283,6 +307,8 @@ class TelegramBotPoller:
             await self._menu_sessions(chat_id); return
         if data=='mn_banned':
             await self._menu_banned(chat_id); return
+        if data=='set_update':
+            await self._update_service(chat_id); return
         # node menu
         if data=='nodes_add':
             self.state[chat_id]={'kind':'add_node_step','step':0}
@@ -313,6 +339,11 @@ class TelegramBotPoller:
             name=data.split(':',1)[1]
             self.state[chat_id]={'kind':'edit_node_field','node':name,'field':'ssh_key'}
             await self._send(f"مسیر کلید خصوصی برای {name}:", chat_id=chat_id)
+            return
+        if data.startswith('nodeauthkeytext:'):
+            name=data.split(':',1)[1]
+            self.state[chat_id]={'kind':'edit_node_keytext','node':name}
+            await self._send(f"متن کامل کلید خصوصی جدید برای {name} را بفرست (با -----BEGIN شروع):", chat_id=chat_id)
             return
         # inbound limits
         if data=='inb_add':
@@ -436,6 +467,7 @@ class TelegramBotPoller:
             [('Host','nodeedit:'+name+':host'),('User','nodeedit:'+name+':ssh_user')],
             [('Port','nodeedit:'+name+':ssh_port'),('Container','nodeedit:'+name+':docker_container')],
             [('AuthPass','nodeauthpass:'+name),('AuthKey','nodeauthkey:'+name)],
+            [('AuthKeyText','nodeauthkeytext:'+name)],
             [('❌ حذف','nodedelete:'+name),('⬅️ برگشت','mn_nodes')]
         ]
         await self._send(txt, self._kb(rows), chat_id=chat_id)
@@ -540,3 +572,33 @@ class TelegramBotPoller:
             await self._send(f"✅ نود {node_name}: متصل و در حال استریم (PID={pid}).", chat_id=chat_id)
         except Exception as e:
             await self._send(f"❌ نود {node_name}: خطای داخلی تست اتصال: {e}", chat_id=chat_id)
+
+    async def _update_service(self, chat_id:str):
+        """Git pull + pip install editable + restart service, with cooldown."""
+        now=time.time()
+        if now - self._last_update_ts < 120:  # 2 min cooldown
+            await self._send("⏳ اخیراً آپدیت اجرا شده؛ کمی بعد دوباره تلاش کن.", chat_id=chat_id)
+            return
+        self._last_update_ts=now
+        await self._send("🆕 درحال آپدیت پروژه...", chat_id=chat_id)
+        script=(
+            "set -e; cd /opt/m1m-guardian; "
+            "echo '[1/5] git fetch' ; git fetch --all --prune >/dev/null 2>&1 || echo 'git fetch failed'; "
+            "echo '[2/5] git reset' ; git reset --hard origin/main 2>&1; "
+            "echo '[3/5] pip install' ; /opt/m1m-guardian/.venv/bin/pip install -U -e . 2>&1 || true; "
+            "echo '[4/5] restart service' ; systemctl restart m1m-guardian 2>&1 || true; "
+            "echo '[5/5] current commit:'; git rev-parse --short HEAD || true"
+        )
+        try:
+            proc=await asyncio.create_subprocess_exec('bash','-lc',script, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            out, _=await proc.communicate()
+            text=out.decode(errors='ignore')
+            import re
+            m=re.findall(r"[0-9a-f]{7,10}", text)
+            commit=m[-1] if m else 'unknown'
+            status = '✅ آپدیت شد' if proc.returncode==0 else f"⚠️ کد خروج {proc.returncode}"
+            trimmed='\n'.join([l for l in text.strip().split('\n') if l][:25])
+            msg = f"{status}\nCommit: `{commit}`\n```\n{trimmed}\n```"
+            await self._send(msg, chat_id=chat_id, parse_mode='Markdown')
+        except Exception as e:
+            await self._send(f"❌ خطا در آپدیت: {e}", chat_id=chat_id)
