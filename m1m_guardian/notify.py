@@ -14,18 +14,39 @@ class TelegramNotifier:
         if not self.enabled:
             log.debug("Telegram notifier disabled (missing token/chat_id)")
 
+    def _needs_plain(self, text:str)->bool:
+        """Return True if we should disable Markdown to avoid 400 Bad Request.
+        Heuristic: if text contains markdown special chars but no backticks and no asterisks balanced.
+        """
+        if not text: return False
+        # If already using code fences/backticks assume safe.
+        if '`' in text: return False
+        # Raw guardian / system lines often contain underscores / square brackets.
+        specials = ['_', '*', '[', ']', '(', ')']
+        if any(s in text for s in specials):
+            return True
+        return False
+
+    def _prepare(self, text:str, parse_mode:str|None):
+        # If parse_mode requested but heuristic says plain, drop parse_mode
+        if parse_mode and self._needs_plain(text):
+            return None
+        return parse_mode
+
     async def send(self, text:str, parse_mode:str|None='Markdown'):
         if not self.enabled: return
+        pm = self._prepare(text, parse_mode)
         payload={ 'chat_id': self.chat_id, 'text': text[:4000], 'disable_web_page_preview':'true'}
-        if parse_mode: payload['parse_mode']=parse_mode
+        if pm: payload['parse_mode']=pm
         await asyncio.to_thread(self._post, payload)
 
     async def send_with_inline(self, text:str, buttons:list[list[tuple[str,str]]], parse_mode:str|None='Markdown'):
         """buttons: list of rows; each row list of (label, callback_data)."""
         if not self.enabled: return
+        pm = self._prepare(text, parse_mode)
         markup={"inline_keyboard": [[{"text": b[0], "callback_data": b[1]} for b in row] for row in buttons]}
         payload={ 'chat_id': self.chat_id, 'text': text[:4000], 'reply_markup': json.dumps(markup), 'disable_web_page_preview':'true'}
-        if parse_mode: payload['parse_mode']=parse_mode
+        if pm: payload['parse_mode']=pm
         await asyncio.to_thread(self._post, payload)
 
     def _post(self, fields:dict):
