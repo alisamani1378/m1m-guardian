@@ -138,7 +138,18 @@ class TelegramBotPoller:
         data={'chat_id': chat_id, 'text': text[:4000], 'disable_web_page_preview':'true'}
         if markup: data['reply_markup']=json.dumps(markup)
         if parse_mode: data['parse_mode']=parse_mode
-        await asyncio.to_thread(self._api_post,'sendMessage', data)
+        try:
+            await asyncio.to_thread(self._api_post,'sendMessage', data)
+        except Exception as e:
+            # Downgrade to plain text and retry once (Markdown errors etc.)
+            try:
+                if parse_mode:
+                    data.pop('parse_mode', None)
+                    await asyncio.to_thread(self._api_post,'sendMessage', data)
+                else:
+                    logging.getLogger('guardian.notify').debug("telegram send fail final: %s", e)
+            except Exception:
+                logging.getLogger('guardian.notify').debug("telegram send retry failed: %s", e)
 
     def _kb(self, rows:list[list[tuple[str,str]]]):
         return {"inline_keyboard": [[{"text":t,"callback_data":d} for (t,d) in row] for row in rows]}
@@ -191,8 +202,14 @@ class TelegramBotPoller:
                 else:
                     if field=='ssh_port':
                         try: node[field]=int(text)
-                        except: await self._send("پورت نامعتبر", chat_id=chat_id); self.state.pop(chat_id,None); return
+                        except:
+                            await self._send("پورت نامعتبر", chat_id=chat_id); self.state.pop(chat_id,None); return
                     else:
+                        # auth field logic: ensure only one of ssh_pass / ssh_key kept
+                        if field=='ssh_pass':
+                            node.pop('ssh_key', None)
+                        if field=='ssh_key':
+                            node.pop('ssh_pass', None)
                         node[field]=text
                     self.save(self.cfg_path,cfg)
                     await self._send(f"بروزرسانی شد: {node_name}.{field}", chat_id=chat_id)
@@ -308,9 +325,10 @@ class TelegramBotPoller:
                 await self._send("وضعیت ناشناخته پاک شد.", chat_id=chat_id)
                 self.state.pop(chat_id,None)
         except Exception as e:
-            log.debug("state input error: %s", e)
+            logging.getLogger('guardian.notify').debug("state input error: %s", e)
             self.state.pop(chat_id,None)
-            await self._send("خطا در پردازش ورودی.", chat_id=chat_id)
+            # show short error to user (avoid leaking long traces)
+            await self._send(f"خطا در پردازش ورودی: {type(e).__name__}", chat_id=chat_id)
 
     # ---------------- callback handlers ----------------
     async def _handle_callback(self, chat_id:str, data:str):
