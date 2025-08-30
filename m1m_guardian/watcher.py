@@ -32,18 +32,25 @@ class NodeWatcher:
         THRESHOLD=10
         COOLDOWN=20*60  # seconds between automatic reboots
         now=time.time()
-        if self._fd_unreadable_count >= THRESHOLD and (now - self._fd_last_reboot) > COOLDOWN:
-            await self._notify(f"♻️ ریبوت خودکار نود {self.spec.name} به علت عدم دسترسی به خروجی xray (fd_unreadable x{self._fd_unreadable_count}).")
-            # try reboot in background (do not block long)
+        if self._fd_unreadable_count >= THRESHOLD:
+            if (now - self._fd_last_reboot) <= COOLDOWN:
+                # Cooldown active
+                await self._notify(f"⏳ نود {self.spec.name}: رسید به حد خطا (fd_unreadable x{self._fd_unreadable_count}) ولی در کول‌داون ریبوت است.")
+                return
+            await self._notify(f"♻️ تلاش برای ریبوت خودکار نود {self.spec.name} (fd_unreadable x{self._fd_unreadable_count}).")
+            reboot_cmd = (
+                "sudo -n reboot || sudo -n /sbin/reboot || sudo -n systemctl reboot || "
+                "sudo -n shutdown -r now || reboot || /sbin/reboot || systemctl reboot || shutdown -r now"
+            )
             async def _reboot():
                 try:
-                    rc = await run_ssh(self.spec, "sudo reboot || reboot || /sbin/reboot || systemctl reboot")
+                    rc = await run_ssh(self.spec, reboot_cmd)
                     if rc!=0:
-                        await self._notify(f"⚠️ ریبوت خودکار نود {self.spec.name} ناموفق بود (rc={rc}). لطفا دستی بررسی کن.")
+                        await self._notify(f"⚠️ ریبوت خودکار نود {self.spec.name} ناموفق (rc={rc}). لطفا دستی بررسی شود.")
                     else:
-                        await self._notify(f"✅ فرمان ریبوت برای نود {self.spec.name} ارسال شد. چند دقیقه صبر کنید تا مجددا متصل شود.")
+                        await self._notify(f"✅ فرمان ریبوت ارسال شد برای {self.spec.name}. منتظر اتصال مجدد باشید.")
                 except Exception as e:
-                    await self._notify(f"⚠️ خطا در ریبوت خودکار نود {self.spec.name}: {e}")
+                    await self._notify(f"⚠️ خطا هنگام ریبوت خودکار {self.spec.name}: {e}")
             asyncio.create_task(_reboot())
             self._fd_last_reboot=now
             self._fd_unreadable_count=0
@@ -85,8 +92,9 @@ class NodeWatcher:
                             if self._fd_window_start==0 or (now - self._fd_window_start) > 600:  # reset 10m window
                                 self._fd_window_start=now; self._fd_unreadable_count=0
                             self._fd_unreadable_count+=1
-                            if self._fd_unreadable_count in (5,10):
-                                await self._notify(f"⚠️ نود {self.spec.name}: مشکل دسترسی به خروجی xray (fd_unreadable x{self._fd_unreadable_count}).")
+                            # send intermediate counters more verbosely
+                            if self._fd_unreadable_count in (3,5,8,10):
+                                await self._notify(f"⚠️ نود {self.spec.name}: خطای خواندن خروجی xray (fd_unreadable x{self._fd_unreadable_count}).")
                             await self._maybe_reboot_for_fd()
                         continue
                     email, ip, inbound = parse_line(line)
