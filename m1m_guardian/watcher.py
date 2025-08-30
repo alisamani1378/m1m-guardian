@@ -1,5 +1,5 @@
 import asyncio, logging, time
-from .nodes import NodeSpec, stream_logs
+from .nodes import NodeSpec, stream_logs, run_ssh  # added run_ssh import
 from .parser import parse_line
 from .firewall import ensure_rule, ban_ip
 from .notify import TelegramNotifier
@@ -15,6 +15,10 @@ class NodeWatcher:
         self._up_notified=False
         self._last_down_notice=0.0
         self._last_no_proc_count=0
+        # fd_unreadable tracking / auto reboot
+        self._fd_unreadable_count=0
+        self._fd_last_reboot=0.0
+        self._fd_window_start=0.0
 
     async def _notify(self, text:str):
         if self.notifier:
@@ -22,6 +26,28 @@ class NodeWatcher:
                 await self.notifier.send(text)
             except Exception:
                 pass
+
+    async def _maybe_reboot_for_fd(self):
+        """If fd_unreadable repeated threshold times, reboot node once per 20m."""
+        THRESHOLD=10
+        COOLDOWN=20*60  # seconds between automatic reboots
+        now=time.time()
+        if self._fd_unreadable_count >= THRESHOLD and (now - self._fd_last_reboot) > COOLDOWN:
+            await self._notify(f"♻️ ریبوت خودکار نود {self.spec.name} به علت عدم دسترسی به خروجی xray (fd_unreadable x{self._fd_unreadable_count}).")
+            # try reboot in background (do not block long)
+            async def _reboot():
+                try:
+                    rc = await run_ssh(self.spec, "sudo reboot || reboot || /sbin/reboot || systemctl reboot")
+                    if rc!=0:
+                        await self._notify(f"⚠️ ریبوت خودکار نود {self.spec.name} ناموفق بود (rc={rc}). لطفا دستی بررسی کن.")
+                    else:
+                        await self._notify(f"✅ فرمان ریبوت برای نود {self.spec.name} ارسال شد. چند دقیقه صبر کنید تا مجددا متصل شود.")
+                except Exception as e:
+                    await self._notify(f"⚠️ خطا در ریبوت خودکار نود {self.spec.name}: {e}")
+            asyncio.create_task(_reboot())
+            self._fd_last_reboot=now
+            self._fd_unreadable_count=0
+            self._fd_window_start=now
 
     async def run(self):
         if not self._ensured:
@@ -37,6 +63,8 @@ class NodeWatcher:
                         low=line.lower()
                         if 'follow pid=' in low and not self._up_notified:
                             self._up_notified=True; self._last_no_proc_count=0
+                            # reset fd counters on successful attach
+                            self._fd_unreadable_count=0; self._fd_window_start=time.time()
                             await self._notify(f"Node {self.spec.name} attached and streaming logs.")
                         elif 'no_xray_process' in low:
                             self._last_no_proc_count+=1
@@ -52,6 +80,14 @@ class NodeWatcher:
                             if time.time()-self._last_down_notice>30:
                                 self._last_down_notice=time.time(); self._up_notified=False
                                 await self._notify(f"Node {self.spec.name} log stream ended; reconnecting.")
+                        elif 'fd_unreadable' in low:
+                            now=time.time()
+                            if self._fd_window_start==0 or (now - self._fd_window_start) > 600:  # reset 10m window
+                                self._fd_window_start=now; self._fd_unreadable_count=0
+                            self._fd_unreadable_count+=1
+                            if self._fd_unreadable_count in (5,10):
+                                await self._notify(f"⚠️ نود {self.spec.name}: مشکل دسترسی به خروجی xray (fd_unreadable x{self._fd_unreadable_count}).")
+                            await self._maybe_reboot_for_fd()
                         continue
                     email, ip, inbound = parse_line(line)
                     if not email or not ip: continue
@@ -83,10 +119,8 @@ class NodeWatcher:
                             first, rest = display_email.split('.',1)
                             if first.isdigit():
                                 display_email=rest
-                        # single notifier message
                         if success_nodes:
                             nodes_list = ', '.join(success_nodes)
-                            # Structured Persian message to avoid RTL/LTR jumble; wrap dynamic tokens in backticks
                             msg = (f"🚫 *بن IP*\n"
                                    f"IP: `{old_ip}`\n"
                                    f"کاربر: `{display_email}`\n"
