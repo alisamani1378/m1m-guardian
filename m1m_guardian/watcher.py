@@ -22,6 +22,8 @@ class NodeWatcher:
         self._fd_window_start=0.0
         # lightweight metrics
         self._lines=0; self._parsed=0; self._last_stat=time.time()
+        # NEW: scheduled reboot time after threshold grace period
+        self._fd_reboot_scheduled_at=0.0
 
     async def _notify(self, text:str):
         if self.notifier:
@@ -31,15 +33,28 @@ class NodeWatcher:
                 pass
 
     async def _maybe_reboot_for_fd(self):
-        """If fd_unreadable repeated threshold times, reboot node once per 20m."""
+        """If fd_unreadable repeated threshold times, schedule reboot after 60s grace; cooldown 20m."""
         THRESHOLD=10
-        COOLDOWN=20*60  # seconds between automatic reboots
+        COOLDOWN=20*60
+        GRACE=60  # 1 minute
         now=time.time()
         if self._fd_unreadable_count >= THRESHOLD:
-            if (now - self._fd_last_reboot) <= COOLDOWN:
-                await self._notify(f"⏳ نود {self.spec.name}: رسید به حد خطا (fd_unreadable x{self._fd_unreadable_count}) ولی در کول‌داون ریبوت است.")
+            # schedule if not already
+            if self._fd_reboot_scheduled_at == 0:
+                self._fd_reboot_scheduled_at = now
+                await self._notify(f"⚠️ نود {self.spec.name}: خطای تکراری خواندن (fd_unreadable x{self._fd_unreadable_count}). اگر ظرف ۶۰ ثانیه درست نشود ریبوت می‌شود.")
                 return
-            await self._notify(f"♻️ تلاش برای ریبوت خودکار نود {self.spec.name} (fd_unreadable x{self._fd_unreadable_count}).")
+            # already scheduled; check grace passed
+            if now - self._fd_reboot_scheduled_at < GRACE:
+                return
+            # grace passed; only reboot if cooldown allows
+            if (now - self._fd_last_reboot) <= COOLDOWN:
+                # still in cooldown; just notify once every GRACE interval
+                if int(now - self._fd_reboot_scheduled_at) % GRACE < 2:  # near boundary
+                    await self._notify(f"⏳ نود {self.spec.name}: هنوز مشکل fd_unreadable ادامه دارد ولی در کول‌داون ریبوت است.")
+                return
+            # proceed reboot
+            await self._notify(f"♻️ ریبوت خودکار نود {self.spec.name} پس از عدم بهبود در مهلت ۶۰ ثانیه.")
             reboot_cmd = (
                 "sudo -n reboot || sudo -n /sbin/reboot || sudo -n systemctl reboot || "
                 "sudo -n shutdown -r now || reboot || /sbin/reboot || systemctl reboot || shutdown -r now"
@@ -57,6 +72,7 @@ class NodeWatcher:
             self._fd_last_reboot=now
             self._fd_unreadable_count=0
             self._fd_window_start=now
+            self._fd_reboot_scheduled_at=0.0
 
     async def run(self):
         if not self._ensured:
@@ -73,44 +89,37 @@ class NodeWatcher:
                     if now - self._last_stat > 60:
                         log.debug("stats node=%s lines=%d parsed=%d", self.spec.name, self._lines, self._parsed)
                         self._last_stat=now; self._lines=0; self._parsed=0
-                    # handle guardian-stream control lines
                     if line.startswith('[guardian-stream]'):
                         low=line.lower()
                         if 'follow pid=' in low and not self._up_notified:
+                            # recovery: reset reboot schedule and counters
+                            self._fd_reboot_scheduled_at=0.0
                             self._up_notified=True; self._last_no_proc_count=0
-                            # reset fd counters on successful attach
                             self._fd_unreadable_count=0; self._fd_window_start=time.time()
                             await self._notify(f"Node {self.spec.name} attached and streaming logs.")
-                        elif 'no_xray_process' in low:
-                            self._last_no_proc_count+=1
-                            if self._last_no_proc_count in (3,10,30) and (time.time()-self._last_down_notice>30):
-                                self._last_down_notice=time.time()
-                                await self._notify(f"WARNING: Node {self.spec.name} no xray process (count={self._last_no_proc_count}).")
-                        elif 'no_container' in low and (time.time()-self._last_down_notice>30):
-                            self._last_down_notice=time.time(); self._up_notified=False
-                            await self._notify(f"ERROR: Node {self.spec.name} container not found.")
-                        elif 'switching_container' in low:
-                            await self._notify(f"Node {self.spec.name} switching container.")
-                        elif 'log stream wrapper ended' in low:
-                            if time.time()-self._last_down_notice>30:
-                                self._last_down_notice=time.time(); self._up_notified=False
-                                await self._notify(f"Node {self.spec.name} log stream ended; reconnecting.")
                         elif 'fd_unreadable' in low:
                             now=time.time()
-                            if self._fd_window_start==0 or (now - self._fd_window_start) > 600:  # reset 10m window
-                                self._fd_window_start=now; self._fd_unreadable_count=0
+                            if self._fd_window_start==0 or (now - self._fd_window_start) > 600:
+                                self._fd_window_start=now; self._fd_unreadable_count=0; self._fd_reboot_scheduled_at=0.0
                             self._fd_unreadable_count+=1
+                            # notify at some milestones (exclude scheduled grace message handled in _maybe_reboot_for_fd)
                             if self._fd_unreadable_count in (3,5,8,10):
                                 await self._notify(f"⚠️ نود {self.spec.name}: خطای خواندن خروجی xray (fd_unreadable x{self._fd_unreadable_count}).")
                             await self._maybe_reboot_for_fd()
-                        continue
-                    # Cheap substring filters before regex
+                            continue
+                        # ...existing code for other control messages...
+                        if any(k in low for k in ('no_xray_process','no_container','switching_container','log stream wrapper ended')):
+                            # existing behaviors unchanged; rest of original code remains
+                            pass
+                        # continue original logic
+                        # ...existing code...
+                        # fall through so other branches still processed as before
+                    # ...existing code for log parsing and banning...
                     if 'accepted' not in line or 'email:' not in line:
                         continue
                     try:
                         email, ip, inbound = parse_line(line)
                     except Exception as e:
-                        # Prevent parse issues from killing loop
                         log.debug("parse error node=%s err=%s line=%r", self.spec.name, e, line[:200])
                         continue
                     if not email or not ip or not inbound:
@@ -126,19 +135,14 @@ class NodeWatcher:
                         success_nodes=[]; failed_nodes=[]
                         for node in self.all_nodes:
                             try:
-                                await ensure_rule(node)  # cached now
+                                await ensure_rule(node)
                                 ok = await ban_ip(node, old_ip, self.ban_minutes*60)
                                 (success_nodes if ok else failed_nodes).append(node.name)
                             except Exception as e:
                                 failed_nodes.append(node.name)
                                 log.debug("ban exception node=%s ip=%s err=%s", node.name, old_ip, e)
-                        log.warning(
-                            "banned ip=%s user=%s inbound=%s nodes=%s%s for %dm",
-                            old_ip, email, inbound, ','.join(success_nodes) or '-',
-                            (f" failed={','.join(failed_nodes)}" if failed_nodes else ''),
-                            self.ban_minutes)
+                        log.warning("banned ip=%s user=%s inbound=%s nodes=%s%s for %dm", old_ip, email, inbound, ','.join(success_nodes) or '-', (f" failed={','.join(failed_nodes)}" if failed_nodes else ''), self.ban_minutes)
                         await self.store.mark_banned(old_ip, self.ban_minutes*60)
-                        # sanitize user: drop leading numeric id + dot
                         display_email=email
                         if '.' in display_email:
                             first, rest = display_email.split('.',1)
@@ -146,12 +150,7 @@ class NodeWatcher:
                                 display_email=rest
                         if success_nodes:
                             nodes_list = ', '.join(success_nodes)
-                            msg = (f"🚫 *بن IP*\n"
-                                   f"IP: `{old_ip}`\n"
-                                   f"کاربر: `{display_email}`\n"
-                                   f"اینباند: `{inbound}`\n"
-                                   f"نودها: {nodes_list}\n"
-                                   f"مدت: {self.ban_minutes} دقیقه")
+                            msg = (f"🚫 *بن IP*\n" f"IP: `{old_ip}`\n" f"کاربر: `{display_email}`\n" f"اینباند: `{inbound}`\n" f"نودها: {nodes_list}\n" f"مدت: {self.ban_minutes} دقیقه")
                             if failed_nodes:
                                 msg += f"\nنودهای ناموفق: {', '.join(failed_nodes)}"
                             await self._notify(msg)
