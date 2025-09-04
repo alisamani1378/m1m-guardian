@@ -2,6 +2,8 @@ import asyncio, shlex, time
 from .nodes import NodeSpec, _ssh_base
 
 SET_NAME="m1m_guardian"
+# Cache to avoid re-running ensure_rule repeatedly for every ban
+_RULE_ENSURED: set[str] = set()
 
 def _cmd_flush_all(ip:str):
     qip=shlex.quote(ip)
@@ -10,7 +12,12 @@ conntrack -D -s {qip} >/dev/null 2>&1 || true
 fi'''
 
 async def ensure_rule(spec:NodeSpec, force:bool=False):
-    """Idempotently ensure ipset + iptables rules (INPUT/FORWARD/DOCKER-USER)."""
+    """Idempotently ensure ipset + iptables rules (INPUT/FORWARD/DOCKER-USER).
+    Uses in-process cache to prevent spawning ssh each time a ban occurs.
+    """
+    key = f"{spec.host}:{spec.ssh_port}"
+    if not force and key in _RULE_ENSURED:
+        return
     inner = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
 (command -v ipset >/dev/null 2>&1) || ( $SUDO apt-get update -y >/dev/null 2>&1 && $SUDO apt-get install -y ipset >/dev/null 2>&1 ) || ( $SUDO apk add --no-cache ipset >/dev/null 2>&1 ) || ( $SUDO yum install -y ipset >/dev/null 2>&1 ) || true
 IPT=$(command -v iptables-legacy || command -v iptables || true)
@@ -25,6 +32,7 @@ true'''.strip()
     cmd = _ssh_base(spec) + [inner]
     p = await asyncio.create_subprocess_exec(*cmd)
     await p.wait()
+    _RULE_ENSURED.add(key)
 
 async def ban_ip(spec:NodeSpec, ip:str, seconds:int)->bool:
     """Add IP to set & flush conntrack. Returns True if ipset membership confirmed."""

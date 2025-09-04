@@ -168,6 +168,7 @@ async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
             await asyncio.sleep(min(30, 2*failure_streak))
             continue
         start=time.time(); had_output=False
+        raw_count=0  # sampling counter for raw logs
         try:
             assert proc.stdout is not None
             while True:
@@ -203,7 +204,9 @@ async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
                             break  # break current stream to retry quickly
                         else:
                             log.error("hostkey rotated node=%s host=%s fingerprint=%s action=remove_failed(stream)", spec.name, spec.host, fingerprint)
-                    log.debug("node=%s raw-log: %s", spec.name, text)
+                    raw_count+=1
+                    if raw_count % 20 == 0:  # sample every 20th raw line
+                        log.debug("node=%s raw-log(sampled): %s", spec.name, text)
                     yield text
         finally:
             rc=getattr(proc,'returncode',None)
@@ -217,5 +220,5 @@ async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
                     log.warning("log stream wrapper ended node=%s rc=%s uptime=%.1fs", spec.name, rc, uptime)
             else:
                 failure_streak=0
-            yield f"[guardian-stream-exit rc={rc}]"
+            # Do not yield inside finally to avoid GeneratorExit issues.
             await asyncio.sleep(4)

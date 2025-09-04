@@ -7,8 +7,9 @@ from .notify import TelegramNotifier
 log = logging.getLogger("guardian.watcher")
 
 class NodeWatcher:
-    def __init__(self, spec:NodeSpec, store, limits:dict, ban_minutes:int, all_nodes:list[NodeSpec], notifier:TelegramNotifier|None=None):
-        self.spec=spec; self.store=store; self.limits=limits; self.ban_minutes=ban_minutes
+    def __init__(self, spec:NodeSpec, store, limits:dict|None, ban_minutes:int, all_nodes:list[NodeSpec], notifier:TelegramNotifier|None=None):
+        # Accept limits possibly None
+        self.spec=spec; self.store=store; self.limits=limits or {}; self.ban_minutes=ban_minutes
         self.all_nodes=all_nodes; self.notifier=notifier
         self._ensured=False
         # node state
@@ -19,6 +20,8 @@ class NodeWatcher:
         self._fd_unreadable_count=0
         self._fd_last_reboot=0.0
         self._fd_window_start=0.0
+        # lightweight metrics
+        self._lines=0; self._parsed=0; self._last_stat=time.time()
 
     async def _notify(self, text:str):
         if self.notifier:
@@ -34,7 +37,6 @@ class NodeWatcher:
         now=time.time()
         if self._fd_unreadable_count >= THRESHOLD:
             if (now - self._fd_last_reboot) <= COOLDOWN:
-                # Cooldown active
                 await self._notify(f"⏳ نود {self.spec.name}: رسید به حد خطا (fd_unreadable x{self._fd_unreadable_count}) ولی در کول‌داون ریبوت است.")
                 return
             await self._notify(f"♻️ تلاش برای ریبوت خودکار نود {self.spec.name} (fd_unreadable x{self._fd_unreadable_count}).")
@@ -65,6 +67,12 @@ class NodeWatcher:
         while True:
             try:
                 async for line in stream_logs(self.spec):
+                    # lightweight periodic stats (every 60s)
+                    self._lines+=1
+                    now=time.time()
+                    if now - self._last_stat > 60:
+                        log.debug("stats node=%s lines=%d parsed=%d", self.spec.name, self._lines, self._parsed)
+                        self._last_stat=now; self._lines=0; self._parsed=0
                     # handle guardian-stream control lines
                     if line.startswith('[guardian-stream]'):
                         low=line.lower()
@@ -92,15 +100,25 @@ class NodeWatcher:
                             if self._fd_window_start==0 or (now - self._fd_window_start) > 600:  # reset 10m window
                                 self._fd_window_start=now; self._fd_unreadable_count=0
                             self._fd_unreadable_count+=1
-                            # send intermediate counters more verbosely
                             if self._fd_unreadable_count in (3,5,8,10):
                                 await self._notify(f"⚠️ نود {self.spec.name}: خطای خواندن خروجی xray (fd_unreadable x{self._fd_unreadable_count}).")
                             await self._maybe_reboot_for_fd()
                         continue
-                    email, ip, inbound = parse_line(line)
-                    if not email or not ip: continue
+                    # Cheap substring filters before regex
+                    if 'accepted' not in line or 'email:' not in line:
+                        continue
+                    try:
+                        email, ip, inbound = parse_line(line)
+                    except Exception as e:
+                        # Prevent parse issues from killing loop
+                        log.debug("parse error node=%s err=%s line=%r", self.spec.name, e, line[:200])
+                        continue
+                    if not email or not ip or not inbound:
+                        continue
                     limit = self.limits.get(inbound)
-                    if limit is None: continue
+                    if limit is None:
+                        continue
+                    self._parsed+=1
                     evicted, _ = await self.store.add_ip(inbound,email,ip,int(limit))
                     for old_ip in evicted:
                         if old_ip == ip: continue
@@ -108,13 +126,12 @@ class NodeWatcher:
                         success_nodes=[]; failed_nodes=[]
                         for node in self.all_nodes:
                             try:
-                                await ensure_rule(node)
+                                await ensure_rule(node)  # cached now
                                 ok = await ban_ip(node, old_ip, self.ban_minutes*60)
                                 (success_nodes if ok else failed_nodes).append(node.name)
                             except Exception as e:
                                 failed_nodes.append(node.name)
                                 log.debug("ban exception node=%s ip=%s err=%s", node.name, old_ip, e)
-                        # summary log (single)
                         log.warning(
                             "banned ip=%s user=%s inbound=%s nodes=%s%s for %dm",
                             old_ip, email, inbound, ','.join(success_nodes) or '-',
