@@ -3,6 +3,7 @@ import os, time
 from typing import List, Dict, Tuple
 from .firewall import unban_ip  # removed ensure_rule unused
 from .nodes import NodeSpec
+from .config import ensure_defaults  # added
 
 log = logging.getLogger("guardian.notify")
 
@@ -193,6 +194,7 @@ class TelegramBotPoller:
         if not st: return
         kind=st.get('kind')
         cfg=self.load(self.cfg_path)
+        ensure_defaults(cfg)  # ensure structure
         try:
             if kind=='edit_node_field':
                 node_name=st['node']; field=st['field']
@@ -241,7 +243,9 @@ class TelegramBotPoller:
                 name=st['inbound']
                 try: v=int(text)
                 except: await self._send("عدد نامعتبر", chat_id=chat_id); return
-                cfg.setdefault('inbounds_limit',{})[name]=v; self.save(self.cfg_path,cfg)
+                if not isinstance(cfg.get('inbounds_limit'), dict):
+                    cfg['inbounds_limit']={}
+                cfg['inbounds_limit'][name]=v; self.save(self.cfg_path,cfg)
                 await self._send(f"حد {name} = {v} ذخیره شد (ریست برای اعمال)", chat_id=chat_id)
                 self.state.pop(chat_id,None)
                 await self._menu_inbounds(chat_id)
@@ -256,7 +260,9 @@ class TelegramBotPoller:
                 try: v=int(text)
                 except: await self._send("عدد نامعتبر", chat_id=chat_id); return
                 name=st.get('new_name')
-                cfg.setdefault('inbounds_limit',{})[name]=v; self.save(self.cfg_path,cfg)
+                if not isinstance(cfg.get('inbounds_limit'), dict):
+                    cfg['inbounds_limit']={}
+                cfg['inbounds_limit'][name]=v; self.save(self.cfg_path,cfg)
                 await self._send(f"این‌باند {name} با حد {v} افزوده شد.", chat_id=chat_id)
                 self.state.pop(chat_id,None)
                 await self._menu_inbounds(chat_id)
