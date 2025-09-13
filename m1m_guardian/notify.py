@@ -2,7 +2,7 @@ import asyncio, json, logging, urllib.request, urllib.parse
 import os, time
 from typing import List, Dict, Tuple
 from .firewall import unban_ip  # removed ensure_rule unused
-from .nodes import NodeSpec
+from .nodes import NodeSpec, run_ssh
 from .config import ensure_defaults  # added
 
 log = logging.getLogger("guardian.notify")
@@ -98,6 +98,8 @@ class TelegramBotPoller:
         self._load_offset()
         self._pending_post_add:dict[str,float]={}
         self._last_update_ts=0.0  # cooldown for update
+        # NEW: per-node reboot cooldown tracking
+        self._last_node_reboot:dict[str,float]={}
 
     # ---------------- core polling ----------------
     async def start(self):
@@ -362,6 +364,14 @@ class TelegramBotPoller:
         if data.startswith('node:'):
             name=data.split(':',1)[1]
             await self._show_node(name, chat_id); return
+        # NEW: node reboot callbacks
+        if data.startswith('noderebootconfirm:'):
+            name=data.split(':',1)[1]
+            await self._perform_node_reboot(name, chat_id); return
+        if data.startswith('nodereboot:'):
+            name=data.split(':',1)[1]
+            await self._send(f"ریبوت نود {name} انجام شود؟", self._kb([[('✅ بله','noderebootconfirm:'+name),('↩️ برگشت','node:'+name)]]), chat_id=chat_id)
+            return
         if data.startswith('nodedelete:'):
             name=data.split(':',1)[1]
             cfg=self.load(self.cfg_path); before=len(cfg.get('nodes',[]))
@@ -513,6 +523,7 @@ class TelegramBotPoller:
             [('Port','nodeedit:'+name+':ssh_port'),('Container','nodeedit:'+name+':docker_container')],
             [('AuthPass','nodeauthpass:'+name),('AuthKey','nodeauthkey:'+name)],
             [('AuthKeyText','nodeauthkeytext:'+name)],
+            [('♻️ ریبوت','nodereboot:'+name)],  # NEW reboot button
             [('❌ حذف','nodedelete:'+name),('⬅️ برگشت','mn_nodes')]
         ]
         await self._send(txt, self._kb(rows), chat_id=chat_id)
@@ -647,3 +658,34 @@ class TelegramBotPoller:
             await self._send(msg, chat_id=chat_id, parse_mode='Markdown')
         except Exception as e:
             await self._send(f"❌ خطا در آپدیت: {e}", chat_id=chat_id)
+
+    async def _perform_node_reboot(self, name:str, chat_id:str):
+        """Perform a reboot on a specific node via SSH with cooldown."""
+        COOLDOWN=300  # 5 minutes
+        now=time.time()
+        last=self._last_node_reboot.get(name,0)
+        if now - last < COOLDOWN:
+            remain=int(COOLDOWN-(now-last))
+            await self._send(f"⏳ ریبوت اخیر انجام شده. {remain}s دیگر دوباره تلاش کن.", chat_id=chat_id)
+            return
+        cfg=self.load(self.cfg_path)
+        node=self._find_node(cfg,name)
+        if not node:
+            await self._send("نود یافت نشد.", chat_id=chat_id); return
+        self._last_node_reboot[name]=now
+        await self._send(f"ارسال فرمان ریبوت به {name}...", chat_id=chat_id)
+        async def _do():
+            try:
+                spec=NodeSpec(node.get('name'), node.get('host'), node.get('ssh_user'), node.get('ssh_port'), node.get('docker_container'), node.get('ssh_key'), node.get('ssh_pass'))
+                # Use a broad command list; SSH will likely drop connection, so rc may be non-zero.
+                cmd="sudo -n reboot || sudo -n /sbin/reboot || sudo -n systemctl reboot || sudo -n shutdown -r now || reboot || /sbin/reboot || systemctl reboot || shutdown -r now"
+                rc=await run_ssh(spec, cmd)
+                if rc==0:
+                    await self._send(f"✅ فرمان ریبوت ارسال شد به {name}.", chat_id=chat_id)
+                else:
+                    # Even non-zero could mean connection dropped due to reboot; treat rc>0 as uncertain
+                    await self._send(f"⚠️ نتیجه نامشخص (rc={rc}) شاید در حال ریبوت باشد {name}.", chat_id=chat_id)
+            except Exception as e:
+                await self._send(f"❌ خطا در ریبوت {name}: {e}", chat_id=chat_id)
+        asyncio.create_task(_do())
+
