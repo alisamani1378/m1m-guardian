@@ -104,7 +104,7 @@ case "$BACKEND" in
     # هیچ بک‌اندی در دسترس نیست
     exit 0
   ;;
-cesac
+esac
 true'''.strip()
 
     cmd = _ssh_base(spec) + [inner]
@@ -151,11 +151,25 @@ esac
 
 {conntrack_block}
 # membership test
-if [ {1 if is_v6 else 0} -eq 1 ]; then
-  ipset test {SET_V6} {_q(ip)} >/dev/null 2>&1 || echo '__TEST_FAIL__'
-else
-  ipset test {SET_V4} {_q(ip)} >/dev/null 2>&1 || echo '__TEST_FAIL__'
-fi
+case "$BACKEND" in
+  "IPTABLES")
+    if [ {1 if is_v6 else 0} -eq 1 ]; then
+      ipset test {SET_V6} {_q(ip)} >/dev/null 2>&1 || echo '__TEST_FAIL__'
+    else
+      ipset test {SET_V4} {_q(ip)} >/dev/null 2>&1 || echo '__TEST_FAIL__'
+    fi
+  ;;
+  "NFT")
+    if [ {1 if is_v6 else 0} -eq 1 ]; then
+      $SUDO nft get element inet filter {SET_V6} {{ {_q(ip)} }} >/dev/null 2>&1 || echo '__TEST_FAIL__'
+    else
+      $SUDO nft get element inet filter {SET_V4} {{ {_q(ip)} }} >/dev/null 2>&1 || echo '__TEST_FAIL__'
+    fi
+  ;;
+  *)
+    echo '__TEST_FAIL__'
+  ;;
+esac
 true'''
 
     cmd = _ssh_base(spec) + [add_cmd]
@@ -170,7 +184,19 @@ true'''
 
 async def is_banned(spec: NodeSpec, ip: str) -> bool:
     set_name = SET_V6 if _is_ipv6(ip) else SET_V4
-    test_cmd = f"ipset test {set_name} {_q(ip)} >/dev/null 2>&1"
+    test_cmd = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
+BACKEND=$({_remote_detect_backend()})
+case "$BACKEND" in
+  "IPTABLES")
+    ipset test {set_name} {_q(ip)} >/dev/null 2>&1
+  ;;
+  "NFT")
+    $SUDO nft get element inet filter {set_name} {{ {_q(ip)} }} >/dev/null 2>&1
+  ;;
+  *)
+    exit 1
+  ;;
+esac'''
     cmd = _ssh_base(spec) + [test_cmd]
     p = await asyncio.create_subprocess_exec(*cmd)
     rc = await p.wait()
