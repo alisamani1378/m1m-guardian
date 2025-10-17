@@ -111,6 +111,11 @@ true'''.strip()
 
 async def ban_ip(spec: NodeSpec, ip: str, seconds: int) -> bool:
     """Add IP (v4/v6) with TTL to the appropriate set and flush conntrack. Returns True if membership confirmed."""
+    # validate IP strictly to avoid malformed input or shell injection
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return False
     is_v6 = _is_ipv6(ip)
     conntrack_block = _cmd_flush_all(ip)
 
@@ -134,10 +139,10 @@ case "$BACKEND" in
     $SUDO nft list table inet filter >/dev/null 2>&1 || $SUDO nft add table inet filter
     if [ {1 if is_v6 else 0} -eq 1 ]; then
       $SUDO nft list set inet filter {SET_V6} >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V6} '{{ type ipv6_addr; timeout 0s; flags timeout; }}'
-      $SUDO nft add element inet filter {SET_V6} '{{ {_q(ip)} timeout {int(seconds)}s }}'
+      $SUDO nft add element inet filter {SET_V6} "{{ {ip} timeout {int(seconds)}s }}"
     else
       $SUDO nft list set inet filter {SET_V4} >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V4} '{{ type ipv4_addr; timeout 0s; flags timeout; }}'
-      $SUDO nft add element inet filter {SET_V4} '{{ {_q(ip)} timeout {int(seconds)}s }}'
+      $SUDO nft add element inet filter {SET_V4} "{{ {ip} timeout {int(seconds)}s }}"
     fi
   ;;
   *)
@@ -157,9 +162,9 @@ case "$BACKEND" in
   ;;
   "NFT")
     if [ {1 if is_v6 else 0} -eq 1 ]; then
-      $SUDO nft get element inet filter {SET_V6} '{{ {_q(ip)} }}' >/dev/null 2>&1 || echo '__TEST_FAIL__'
+      $SUDO nft get element inet filter {SET_V6} "{{ {ip} }}" >/dev/null 2>&1 || echo '__TEST_FAIL__'
     else
-      $SUDO nft get element inet filter {SET_V4} '{{ {_q(ip)} }}' >/dev/null 2>&1 || echo '__TEST_FAIL__'
+      $SUDO nft get element inet filter {SET_V4} "{{ {ip} }}" >/dev/null 2>&1 || echo '__TEST_FAIL__'
     fi
   ;;
   *)
@@ -179,6 +184,11 @@ true'''
     return ok
 
 async def is_banned(spec: NodeSpec, ip: str) -> bool:
+    # validate IP to avoid running commands on invalid input
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return False
     set_name = SET_V6 if _is_ipv6(ip) else SET_V4
     test_cmd = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
 BACKEND=$({_remote_detect_backend()})
@@ -187,7 +197,7 @@ case "$BACKEND" in
     ipset test {set_name} {_q(ip)} >/dev/null 2>&1
   ;;
   "NFT")
-    $SUDO nft get element inet filter {set_name} '{{ {_q(ip)} }}' >/dev/null 2>&1
+    $SUDO nft get element inet filter {set_name} "{{ {ip} }}" >/dev/null 2>&1
   ;;
   *)
     exit 1
@@ -200,6 +210,11 @@ esac'''
 
 async def unban_ip(spec: NodeSpec, ip: str) -> bool:
     """Remove IP from set (if present) and flush conntrack."""
+    # validate IP to avoid malformed input
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return False
     set_name = SET_V6 if _is_ipv6(ip) else SET_V4
     del_cmd = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
 BACKEND=$({_remote_detect_backend()})
@@ -210,10 +225,10 @@ case "$BACKEND" in
   ;;
   "NFT")
     # try to delete element if set exists
-    $SUDO nft list set inet filter {set_name} >/dev/null 2>&1 && $SUDO nft delete element inet filter {set_name} '{{ {_q(ip)} }}' 2>/dev/null || true
+    $SUDO nft list set inet filter {set_name} >/dev/null 2>&1 && $SUDO nft delete element inet filter {set_name} "{{ {ip} }}" 2>/dev/null || true
   ;;
-    *) ;;
-    esac
+  *) ;;
+  esac
 {_cmd_flush_all(ip)}
 true'''
     cmd = _ssh_base(spec) + [del_cmd]
