@@ -45,9 +45,6 @@ async def ensure_rule(spec: NodeSpec, force: bool = False):
     inner = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
 
 # --- detect backend ---
-{_remote_detect_backend()}
-
-# shell var BACKEND now contains IPTABLES or NFT
 BACKEND=$({_remote_detect_backend()})
 
 case "$BACKEND" in
@@ -82,14 +79,14 @@ case "$BACKEND" in
     # DOCKER-USER اگر وجود ندارد، به‌صورت hook input می‌سازیم (safe priority 0)
     if ! $SUDO nft list chain inet filter DOCKER-USER >/dev/null 2>&1; then
       if ! $SUDO nft list chain inet filter INPUT >/dev/null 2>&1; then
-        $SUDO nft add chain inet filter INPUT {{ type filter hook input priority 0 \\; }}
+        $SUDO nft add chain inet filter INPUT '{{ type filter hook input priority 0 ; }}'
       fi
       # داشتن DOCKER-USER مزیت دارد؛ اگر نبود، از INPUT استفاده می‌کنیم
-      $SUDO nft add chain inet filter DOCKER-USER {{ type filter hook input priority 0 \\; }} 2>/dev/null || true
+      $SUDO nft add chain inet filter DOCKER-USER '{{ type filter hook input priority 0 ; }}' 2>/dev/null || true
     fi
     # sets با قابلیت timeout
-    $SUDO nft list set inet filter {SET_V4}   >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V4}   {{ type ipv4_addr; timeout 0s; flags timeout; }}
-    $SUDO nft list set inet filter {SET_V6}   >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V6}   {{ type ipv6_addr; timeout 0s; flags timeout; }}
+    $SUDO nft list set inet filter {SET_V4}   >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V4}   '{{ type ipv4_addr; timeout 0s; flags timeout; }}'
+    $SUDO nft list set inet filter {SET_V6}   >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V6}   '{{ type ipv6_addr; timeout 0s; flags timeout; }}'
 
     # ruleها را اگر وجود ندارد اضافه کن (اول DOCKER-USER، بعد INPUT)
     if $SUDO nft list chain inet filter DOCKER-USER >/dev/null 2>&1; then
@@ -115,7 +112,6 @@ true'''.strip()
 async def ban_ip(spec: NodeSpec, ip: str, seconds: int) -> bool:
     """Add IP (v4/v6) with TTL to the appropriate set and flush conntrack. Returns True if membership confirmed."""
     is_v6 = _is_ipv6(ip)
-    set_name = SET_V6 if is_v6 else SET_V4
     conntrack_block = _cmd_flush_all(ip)
 
     add_cmd = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
@@ -137,11 +133,11 @@ case "$BACKEND" in
     # ensure table/sets exist
     $SUDO nft list table inet filter >/dev/null 2>&1 || $SUDO nft add table inet filter
     if [ {1 if is_v6 else 0} -eq 1 ]; then
-      $SUDO nft list set inet filter {SET_V6} >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V6} {{ type ipv6_addr; timeout 0s; flags timeout; }}
-      $SUDO nft add element inet filter {SET_V6} {{ {_q(ip)} timeout {int(seconds)}s }}
+      $SUDO nft list set inet filter {SET_V6} >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V6} '{{ type ipv6_addr; timeout 0s; flags timeout; }}'
+      $SUDO nft add element inet filter {SET_V6} '{{ {_q(ip)} timeout {int(seconds)}s }}'
     else
-      $SUDO nft list set inet filter {SET_V4} >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V4} {{ type ipv4_addr; timeout 0s; flags timeout; }}
-      $SUDO nft add element inet filter {SET_V4} {{ {_q(ip)} timeout {int(seconds)}s }}
+      $SUDO nft list set inet filter {SET_V4} >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V4} '{{ type ipv4_addr; timeout 0s; flags timeout; }}'
+      $SUDO nft add element inet filter {SET_V4} '{{ {_q(ip)} timeout {int(seconds)}s }}'
     fi
   ;;
   *)
@@ -161,9 +157,9 @@ case "$BACKEND" in
   ;;
   "NFT")
     if [ {1 if is_v6 else 0} -eq 1 ]; then
-      $SUDO nft get element inet filter {SET_V6} {{ {_q(ip)} }} >/dev/null 2>&1 || echo '__TEST_FAIL__'
+      $SUDO nft get element inet filter {SET_V6} '{{ {_q(ip)} }}' >/dev/null 2>&1 || echo '__TEST_FAIL__'
     else
-      $SUDO nft get element inet filter {SET_V4} {{ {_q(ip)} }} >/dev/null 2>&1 || echo '__TEST_FAIL__'
+      $SUDO nft get element inet filter {SET_V4} '{{ {_q(ip)} }}' >/dev/null 2>&1 || echo '__TEST_FAIL__'
     fi
   ;;
   *)
@@ -191,7 +187,7 @@ case "$BACKEND" in
     ipset test {set_name} {_q(ip)} >/dev/null 2>&1
   ;;
   "NFT")
-    $SUDO nft get element inet filter {set_name} {{ {_q(ip)} }} >/dev/null 2>&1
+    $SUDO nft get element inet filter {set_name} '{{ {_q(ip)} }}' >/dev/null 2>&1
   ;;
   *)
     exit 1
@@ -214,9 +210,10 @@ case "$BACKEND" in
   ;;
   "NFT")
     # try to delete element if set exists
-    $SUDO nft list set inet filter {set_name} >/dev/null 2>&1 && $SUDO nft delete element inet filter {set_name} {{ {_q(ip)} }} 2>/dev/null || true
+    $SUDO nft list set inet filter {set_name} >/dev/null 2>&1 && $SUDO nft delete element inet filter {set_name} '{{ {_q(ip)} }}' 2>/dev/null || true
   ;;
-esac
+    *) ;;
+    esac
 {_cmd_flush_all(ip)}
 true'''
     cmd = _ssh_base(spec) + [del_cmd]
