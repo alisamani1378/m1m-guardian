@@ -103,6 +103,30 @@ class TelegramBotPoller:
         # pagination state (optional)
         self._banned_page:Dict[str,int]={}
 
+    # NEW: offset persistence helpers
+    def _load_offset(self):
+        try:
+            if self.offset_file and os.path.exists(self.offset_file):
+                with open(self.offset_file, 'r', encoding='utf-8') as f:
+                    content = (f.read() or '').strip()
+                    if content:
+                        try:
+                            self.offset = int(content)
+                        except Exception:
+                            # corrupt file; reset
+                            self.offset = 0
+        except Exception as e:
+            log.debug("load offset failed: %s", e)
+            # keep default offset=0
+
+    def _save_offset(self):
+        try:
+            # best-effort; avoid raising inside polling loop
+            with open(self.offset_file, 'w', encoding='utf-8') as f:
+                f.write(str(int(self.offset)))
+        except Exception as e:
+            log.debug("save offset failed: %s", e)
+
     # ---------------- core polling ----------------
     async def start(self):
         log.info("telegram poller started")
@@ -679,6 +703,17 @@ class TelegramBotPoller:
             await self._send(msg, chat_id=chat_id, parse_mode='Markdown')
         except Exception as e:
             await self._send(f"❌ خطا در آپدیت: {e}", chat_id=chat_id)
+
+    # NEW: simple service restart handler used by menu
+    async def _restart_service(self, chat_id:str):
+        try:
+            await self._send("♻️ ریست سرویس در حال انجام...", chat_id=chat_id)
+            # Using sh -lc for portability with the rest of the file
+            proc = await asyncio.create_subprocess_exec('sh','-lc','systemctl restart m1m-guardian || true')
+            await proc.wait()
+            # After restart the current process may be terminated by systemd; message may not be delivered.
+        except Exception as e:
+            await self._send(f"❌ خطا در ریست سرویس: {e}", chat_id=chat_id)
 
     async def _perform_node_reboot(self, name:str, chat_id:str):
         """Perform a reboot on a specific node via SSH with cooldown."""
