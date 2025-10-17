@@ -1,4 +1,4 @@
-import asyncio, shlex, time, ipaddress
+import asyncio, shlex, ipaddress
 from .nodes import NodeSpec, _ssh_base
 
 SET_V4 = "m1m_guardian"
@@ -82,10 +82,10 @@ case "$BACKEND" in
     # DOCKER-USER اگر وجود ندارد، به‌صورت hook input می‌سازیم (safe priority 0)
     if ! $SUDO nft list chain inet filter DOCKER-USER >/dev/null 2>&1; then
       if ! $SUDO nft list chain inet filter INPUT >/dev/null 2>&1; then
-        $SUDO nft add chain inet filter INPUT { type filter hook input priority 0 \\; }
+        $SUDO nft add chain inet filter INPUT {{ type filter hook input priority 0 \\; }}
       fi
       # داشتن DOCKER-USER مزیت دارد؛ اگر نبود، از INPUT استفاده می‌کنیم
-      $SUDO nft add chain inet filter DOCKER-USER { type filter hook input priority 0 \\; } 2>/dev/null || true
+      $SUDO nft add chain inet filter DOCKER-USER {{ type filter hook input priority 0 \\; }} 2>/dev/null || true
     fi
     # sets با قابلیت timeout
     $SUDO nft list set inet filter {SET_V4}   >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V4}   {{ type ipv4_addr; timeout 0s; flags timeout; }}
@@ -104,7 +104,7 @@ case "$BACKEND" in
     # هیچ بک‌اندی در دسترس نیست
     exit 0
   ;;
-esac
+cesac
 true'''.strip()
 
     cmd = _ssh_base(spec) + [inner]
