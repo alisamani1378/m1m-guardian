@@ -73,48 +73,73 @@ case "$BACKEND" in
     $SUDO ipset list {SET_V4} >/dev/null 2>&1 || $SUDO ipset create {SET_V4} hash:ip timeout 0 hashsize 16384 maxelem 1048576 2>/dev/null
     $SUDO ipset list {SET_V6} >/dev/null 2>&1 || $SUDO ipset create {SET_V6} hash:ip family inet6 timeout 0 hashsize 16384 maxelem 1048576 2>/dev/null
 
-    # IPv4 rules (prefer DOCKER-USER if exists)
+    # IPv4 rules (prefer DOCKER-USER if exists) with TCP reset + UDP reject, then DROP
     if [ -n "$IPT" ]; then
       if $IPT -S DOCKER-USER >/dev/null 2>&1; then
-        $IPT -C DOCKER-USER -m set --match-set {SET_V4} src -j DROP 2>/dev/null || $SUDO $IPT -I DOCKER-USER 1 -m set --match-set {SET_V4} src -j DROP
+        $IPT -C DOCKER-USER -p tcp -m set --match-set {SET_V4} src -j REJECT --reject-with tcp-reset 2>/dev/null || $SUDO $IPT -I DOCKER-USER 1 -p tcp -m set --match-set {SET_V4} src -j REJECT --reject-with tcp-reset
+        $IPT -C DOCKER-USER -p udp -m set --match-set {SET_V4} src -j REJECT --reject-with icmp-port-unreachable 2>/dev/null || $SUDO $IPT -I DOCKER-USER 2 -p udp -m set --match-set {SET_V4} src -j REJECT --reject-with icmp-port-unreachable
+        $IPT -C DOCKER-USER -m set --match-set {SET_V4} src -j DROP 2>/dev/null || $SUDO $IPT -I DOCKER-USER 3 -m set --match-set {SET_V4} src -j DROP
       else
-        $IPT -C INPUT   -m set --match-set {SET_V4} src -j DROP 2>/dev/null || $SUDO $IPT -I INPUT   1 -m set --match-set {SET_V4} src -j DROP
-        $IPT -C FORWARD -m set --match-set {SET_V4} src -j DROP 2>/dev/null || $SUDO $IPT -I FORWARD 1 -m set --match-set {SET_V4} src -j DROP
+        $IPT -C INPUT   -p tcp -m set --match-set {SET_V4} src -j REJECT --reject-with tcp-reset 2>/dev/null || $SUDO $IPT -I INPUT   1 -p tcp -m set --match-set {SET_V4} src -j REJECT --reject-with tcp-reset
+        $IPT -C INPUT   -p udp -m set --match-set {SET_V4} src -j REJECT --reject-with icmp-port-unreachable 2>/dev/null || $SUDO $IPT -I INPUT   2 -p udp -m set --match-set {SET_V4} src -j REJECT --reject-with icmp-port-unreachable
+        $IPT -C INPUT   -m set --match-set {SET_V4} src -j DROP 2>/dev/null || $SUDO $IPT -I INPUT   3 -m set --match-set {SET_V4} src -j DROP
+        $IPT -C FORWARD -p tcp -m set --match-set {SET_V4} src -j REJECT --reject-with tcp-reset 2>/dev/null || $SUDO $IPT -I FORWARD 1 -p tcp -m set --match-set {SET_V4} src -j REJECT --reject-with tcp-reset
+        $IPT -C FORWARD -p udp -m set --match-set {SET_V4} src -j REJECT --reject-with icmp-port-unreachable 2>/dev/null || $SUDO $IPT -I FORWARD 2 -p udp -m set --match-set {SET_V4} src -j REJECT --reject-with icmp-port-unreachable
+        $IPT -C FORWARD -m set --match-set {SET_V4} src -j DROP 2>/dev/null || $SUDO $IPT -I FORWARD 3 -m set --match-set {SET_V4} src -j DROP
       fi
     fi
 
     # IPv6 rules using ip6tables (prefer DOCKER-USER if exists)
     if [ -n "$IPT6" ]; then
       if $IPT6 -S DOCKER-USER >/dev/null 2>&1; then
-        $IPT6 -C DOCKER-USER -m set --match-set {SET_V6} src -j DROP 2>/dev/null || $SUDO $IPT6 -I DOCKER-USER 1 -m set --match-set {SET_V6} src -j DROP
+        $IPT6 -C DOCKER-USER -p tcp -m set --match-set {SET_V6} src -j REJECT --reject-with tcp-reset 2>/dev/null || $SUDO $IPT6 -I DOCKER-USER 1 -p tcp -m set --match-set {SET_V6} src -j REJECT --reject-with tcp-reset
+        $IPT6 -C DOCKER-USER -p udp -m set --match-set {SET_V6} src -j REJECT --reject-with icmp6-port-unreachable 2>/dev/null || $SUDO $IPT6 -I DOCKER-USER 2 -p udp -m set --match-set {SET_V6} src -j REJECT --reject-with icmp6-port-unreachable
+        $IPT6 -C DOCKER-USER -m set --match-set {SET_V6} src -j DROP 2>/dev/null || $SUDO $IPT6 -I DOCKER-USER 3 -m set --match-set {SET_V6} src -j DROP
       else
-        $IPT6 -C INPUT   -m set --match-set {SET_V6} src -j DROP 2>/dev/null || $SUDO $IPT6 -I INPUT   1 -m set --match-set {SET_V6} src -j DROP
-        $IPT6 -C FORWARD -m set --match-set {SET_V6} src -j DROP 2>/dev/null || $SUDO $IPT6 -I FORWARD 1 -m set --match-set {SET_V6} src -j DROP
+        $IPT6 -C INPUT   -p tcp -m set --match-set {SET_V6} src -j REJECT --reject-with tcp-reset 2>/dev/null || $SUDO $IPT6 -I INPUT   1 -p tcp -m set --match-set {SET_V6} src -j REJECT --reject-with tcp-reset
+        $IPT6 -C INPUT   -p udp -m set --match-set {SET_V6} src -j REJECT --reject-with icmp6-port-unreachable 2>/dev/null || $SUDO $IPT6 -I INPUT   2 -p udp -m set --match-set {SET_V6} src -j REJECT --reject-with icmp6-port-unreachable
+        $IPT6 -C INPUT   -m set --match-set {SET_V6} src -j DROP 2>/dev/null || $SUDO $IPT6 -I INPUT   3 -m set --match-set {SET_V6} src -j DROP
+        $IPT6 -C FORWARD -p tcp -m set --match-set {SET_V6} src -j REJECT --reject-with tcp-reset 2>/dev/null || $SUDO $IPT6 -I FORWARD 1 -p tcp -m set --match-set {SET_V6} src -j REJECT --reject-with tcp-reset
+        $IPT6 -C FORWARD -p udp -m set --match-set {SET_V6} src -j REJECT --reject-with icmp6-port-unreachable 2>/dev/null || $SUDO $IPT6 -I FORWARD 2 -p udp -m set --match-set {SET_V6} src -j REJECT --reject-with icmp6-port-unreachable
+        $IPT6 -C FORWARD -m set --match-set {SET_V6} src -j DROP 2>/dev/null || $SUDO $IPT6 -I FORWARD 3 -m set --match-set {SET_V6} src -j DROP
       fi
     fi
   ;;
   "NFT")
-    # ensure table/chain/sets (timed)
+    # ensure table and base chains exist
     $SUDO nft list table inet filter >/dev/null 2>&1 || $SUDO nft add table inet filter
-    # DOCKER-USER اگر وجود ندارد، به‌صورت hook input می‌سازیم (safe priority 0)
-    if ! $SUDO nft list chain inet filter DOCKER-USER >/dev/null 2>&1; then
-      if ! $SUDO nft list chain inet filter INPUT >/dev/null 2>&1; then
-        $SUDO nft add chain inet filter INPUT '{{ type filter hook input priority 0 ; }}'
-      fi
-      # داشتن DOCKER-USER مزیت دارد؛ اگر نبود، از INPUT استفاده می‌کنیم
-      $SUDO nft add chain inet filter DOCKER-USER '{{ type filter hook input priority 0 ; }}' 2>/dev/null || true
-    fi
-    # sets با قابلیت timeout و ظرفیت بالا
-    $SUDO nft list set inet filter {SET_V4}   >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V4}   '{{ type ipv4_addr; timeout 0s; flags timeout; size 1048576; }}'
-    $SUDO nft list set inet filter {SET_V6}   >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V6}   '{{ type ipv6_addr; timeout 0s; flags timeout; size 1048576; }}'
+    $SUDO nft list chain inet filter INPUT   >/dev/null 2>&1 || $SUDO nft add chain inet filter INPUT   '{ type filter hook input priority 0 ; }'
+    $SUDO nft list chain inet filter FORWARD >/dev/null 2>&1 || $SUDO nft add chain inet filter FORWARD '{ type filter hook forward priority 0 ; }'
 
-    # ruleها را اگر وجود ندارد اضافه کن (اول DOCKER-USER، بعد INPUT)
+    # sets با قابلیت timeout و ظرفیت بالا
+    $SUDO nft list set inet filter {SET_V4}   >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V4}   '{ type ipv4_addr; timeout 0s; flags timeout; size 1048576; }'
+    $SUDO nft list set inet filter {SET_V6}   >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V6}   '{ type ipv6_addr; timeout 0s; flags timeout; size 1048576; }'
+
     if $SUDO nft list chain inet filter DOCKER-USER >/dev/null 2>&1; then
-      $SUDO nft list ruleset | grep -q 'chain DOCKER-USER' && $SUDO nft list ruleset | grep -q '@{SET_V4}.*drop' || $SUDO nft add rule inet filter DOCKER-USER ip saddr @{SET_V4} drop
-      $SUDO nft list ruleset | grep -q 'chain DOCKER-USER' && $SUDO nft list ruleset | grep -q '@{SET_V6}.*drop' || $SUDO nft add rule inet filter DOCKER-USER ip6 saddr @{SET_V6} drop
+      # Prefer Docker's DOCKER-USER chain (evaluated early in FORWARD path)
+      $SUDO nft list ruleset | grep -q 'chain DOCKER-USER' && $SUDO nft list ruleset | grep -q "ip saddr @{SET_V4} .* reject with tcp reset" || $SUDO nft insert rule inet filter DOCKER-USER ip saddr @{SET_V4} tcp reject with tcp reset
+      $SUDO nft list ruleset | grep -q 'chain DOCKER-USER' && $SUDO nft list ruleset | grep -q "ip saddr @{SET_V4} .* udp reject" || $SUDO nft insert rule inet filter DOCKER-USER ip saddr @{SET_V4} udp reject
+      $SUDO nft list ruleset | grep -q 'chain DOCKER-USER' && $SUDO nft list ruleset | grep -q '@{SET_V4}.* drop' || $SUDO nft insert rule inet filter DOCKER-USER ip saddr @{SET_V4} drop
+
+      $SUDO nft list ruleset | grep -q 'chain DOCKER-USER' && $SUDO nft list ruleset | grep -q "ip6 saddr @{SET_V6} .* reject with tcp reset" || $SUDO nft insert rule inet filter DOCKER-USER ip6 saddr @{SET_V6} tcp reject with tcp reset
+      $SUDO nft list ruleset | grep -q 'chain DOCKER-USER' && $SUDO nft list ruleset | grep -q "ip6 saddr @{SET_V6} .* udp reject" || $SUDO nft insert rule inet filter DOCKER-USER ip6 saddr @{SET_V6} udp reject
+      $SUDO nft list ruleset | grep -q 'chain DOCKER-USER' && $SUDO nft list ruleset | grep -q '@{SET_V6}.* drop' || $SUDO nft insert rule inet filter DOCKER-USER ip6 saddr @{SET_V6} drop
     else
-      $SUDO nft list ruleset | grep -q 'chain INPUT' && $SUDO nft list ruleset | grep -q '@{SET_V4}.*drop' || $SUDO nft add rule inet filter INPUT ip saddr @{SET_V4} drop
-      $SUDO nft list ruleset | grep -q 'chain INPUT' && $SUDO nft list ruleset | grep -q '@{SET_V6}.*drop' || $SUDO nft add rule inet filter INPUT ip6 saddr @{SET_V6} drop
+      # Install rules in both INPUT and FORWARD at top (insert) to preempt established-accept rules
+      $SUDO nft list ruleset | grep -q 'chain INPUT'   && $SUDO nft list ruleset | grep -q "ip saddr @{SET_V4} .* reject with tcp reset" || $SUDO nft insert rule inet filter INPUT   ip saddr @{SET_V4} tcp reject with tcp reset
+      $SUDO nft list ruleset | grep -q 'chain INPUT'   && $SUDO nft list ruleset | grep -q "ip saddr @{SET_V4} .* udp reject" || $SUDO nft insert rule inet filter INPUT   ip saddr @{SET_V4} udp reject
+      $SUDO nft list ruleset | grep -q 'chain INPUT'   && $SUDO nft list ruleset | grep -q '@{SET_V4}.* drop' || $SUDO nft insert rule inet filter INPUT   ip saddr @{SET_V4} drop
+
+      $SUDO nft list ruleset | grep -q 'chain FORWARD' && $SUDO nft list ruleset | grep -q "ip saddr @{SET_V4} .* reject with tcp reset" || $SUDO nft insert rule inet filter FORWARD ip saddr @{SET_V4} tcp reject with tcp reset
+      $SUDO nft list ruleset | grep -q 'chain FORWARD' && $SUDO nft list ruleset | grep -q "ip saddr @{SET_V4} .* udp reject" || $SUDO nft insert rule inet filter FORWARD ip saddr @{SET_V4} udp reject
+      $SUDO nft list ruleset | grep -q 'chain FORWARD' && $SUDO nft list ruleset | grep -q '@{SET_V4}.* drop' || $SUDO nft insert rule inet filter FORWARD ip saddr @{SET_V4} drop
+
+      $SUDO nft list ruleset | grep -q 'chain INPUT'   && $SUDO nft list ruleset | grep -q "ip6 saddr @{SET_V6} .* reject with tcp reset" || $SUDO nft insert rule inet filter INPUT   ip6 saddr @{SET_V6} tcp reject with tcp reset
+      $SUDO nft list ruleset | grep -q 'chain INPUT'   && $SUDO nft list ruleset | grep -q "ip6 saddr @{SET_V6} .* udp reject" || $SUDO nft insert rule inet filter INPUT   ip6 saddr @{SET_V6} udp reject
+      $SUDO nft list ruleset | grep -q 'chain INPUT'   && $SUDO nft list ruleset | grep -q '@{SET_V6}.* drop' || $SUDO nft insert rule inet filter INPUT   ip6 saddr @{SET_V6} drop
+      $SUDO nft list ruleset | grep -q 'chain FORWARD' && $SUDO nft list ruleset | grep -q "ip6 saddr @{SET_V6} .* reject with tcp reset" || $SUDO nft insert rule inet filter FORWARD ip6 saddr @{SET_V6} tcp reject with tcp reset
+      $SUDO nft list ruleset | grep -q 'chain FORWARD' && $SUDO nft list ruleset | grep -q "ip6 saddr @{SET_V6} .* udp reject" || $SUDO nft insert rule inet filter FORWARD ip6 saddr @{SET_V6} udp reject
+      $SUDO nft list ruleset | grep -q 'chain FORWARD' && $SUDO nft list ruleset | grep -q '@{SET_V6}.* drop' || $SUDO nft insert rule inet filter FORWARD ip6 saddr @{SET_V6} drop
     fi
   ;;
   *)
