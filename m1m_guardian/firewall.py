@@ -108,12 +108,12 @@ case "$BACKEND" in
   "NFT")
     # ensure table and base chains exist
     $SUDO nft list table inet filter >/dev/null 2>&1 || $SUDO nft add table inet filter
-    $SUDO nft list chain inet filter INPUT   >/dev/null 2>&1 || $SUDO nft add chain inet filter INPUT   '{ type filter hook input priority 0 ; }'
-    $SUDO nft list chain inet filter FORWARD >/dev/null 2>&1 || $SUDO nft add chain inet filter FORWARD '{ type filter hook forward priority 0 ; }'
+    $SUDO nft list chain inet filter INPUT   >/dev/null 2>&1 || $SUDO nft add chain inet filter INPUT   '{{ type filter hook input priority 0 ; }}'
+    $SUDO nft list chain inet filter FORWARD >/dev/null 2>&1 || $SUDO nft add chain inet filter FORWARD '{{ type filter hook forward priority 0 ; }}'
 
     # sets با قابلیت timeout و ظرفیت بالا
-    $SUDO nft list set inet filter {SET_V4}   >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V4}   '{ type ipv4_addr; timeout 0s; flags timeout; size 1048576; }'
-    $SUDO nft list set inet filter {SET_V6}   >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V6}   '{ type ipv6_addr; timeout 0s; flags timeout; size 1048576; }'
+    $SUDO nft list set inet filter {SET_V4}   >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V4}   '{{ type ipv4_addr; timeout 0s; flags timeout; size 1048576; }}'
+    $SUDO nft list set inet filter {SET_V6}   >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V6}   '{{ type ipv6_addr; timeout 0s; flags timeout; size 1048576; }}'
 
     if $SUDO nft list chain inet filter DOCKER-USER >/dev/null 2>&1; then
       # Prefer Docker's DOCKER-USER chain (evaluated early in FORWARD path)
