@@ -100,6 +100,8 @@ class TelegramBotPoller:
         self._last_update_ts=0.0  # cooldown for update
         # NEW: per-node reboot cooldown tracking
         self._last_node_reboot:dict[str,float]={}
+        # pagination state (optional)
+        self._banned_page:Dict[str,int]={}
 
     # ---------------- core polling ----------------
     async def start(self):
@@ -353,9 +355,23 @@ class TelegramBotPoller:
         if data=='mn_sessions':
             await self._menu_sessions(chat_id); return
         if data=='mn_banned':
-            await self._menu_banned(chat_id); return
+            self._banned_page[chat_id]=0
+            await self._menu_banned(chat_id, page=0); return
         if data=='set_update':
             await self._update_service(chat_id); return
+        # pagination for banned
+        if data.startswith('bannedpage:'):
+            try:
+                page=int(data.split(':',1)[1])
+            except Exception:
+                page=0
+            self._banned_page[chat_id]=max(0,page)
+            await self._menu_banned(chat_id, page=self._banned_page[chat_id]); return
+        if data=='unbanall':
+            await self._send("آیا همه IP های بن شده آن‌بن شوند؟", self._kb([[('✅ بله','unbanallconfirm'),('↩️ برگشت','mn_banned')]]), chat_id=chat_id)
+            return
+        if data=='unbanallconfirm':
+            await self._perform_unban_all(chat_id); return
         # node menu
         if data=='nodes_add':
             self.state[chat_id]={'kind':'add_node_step','step':0}
@@ -462,42 +478,35 @@ class TelegramBotPoller:
         await self._send(f"IP {ip} آنبن شد.", chat_id=chat_id)
         await self._menu_banned(chat_id)
 
-    async def _restart_service(self, chat_id:str):
-        now=time.time()
-        if now - self._last_restart_ts < 60:  # 60s cooldown
-            await self._send("⏳ ریست اخیر انجام شد؛ چند ثانیه دیگر دوباره تلاش کن.", chat_id=chat_id)
-            return
-        self._last_restart_ts=now
-        await self._send("درحال ریست سرویس...", chat_id=chat_id)
+    async def _perform_unban_all(self, chat_id:str):
+        if not self.store:
+            await self._send("Store در دسترس نیست.", chat_id=chat_id); return
+        await self._send("🧹 درحال آن‌بن همه IP ها و پاکسازی ست‌ها...", chat_id=chat_id)
+        deleted=0
         try:
-            asyncio.create_task(self._run_restart())
-        except Exception:
-            await self._send("خطای ریست", chat_id=chat_id)
-
-    async def _run_restart(self):
-        try:
-            proc=await asyncio.create_subprocess_exec('sh','-lc','sleep 1; systemctl restart m1m-guardian')
-            await proc.wait()
+            deleted = await self.store.unmark_all_banned()
         except Exception as e:
-            log.debug("restart error: %s", e)
-    # ---------------- offset persistence ----------------
-    def _load_offset(self):
-        try:
-            if os.path.isfile(self.offset_file):
-                with open(self.offset_file,'r',encoding='utf-8') as f:
-                    val=f.read().strip()
-                    if val.isdigit():
-                        self.offset=int(val)
-                        log.debug("loaded telegram offset=%s", self.offset)
-        except Exception as e:
-            log.debug("load offset failed: %s", e)
-
-    def _save_offset(self):
-        try:
-            with open(self.offset_file,'w',encoding='utf-8') as f:
-                f.write(str(self.offset))
-        except Exception as e:
-            log.debug("save offset failed: %s", e)
+            log.debug("unmark_all_banned error: %s", e)
+        # flush sets on all nodes (best-effort)
+        async def _flush_node(n:NodeSpec):
+            try:
+                script=(
+                    "SUDO=; if [ \"$(id -u)\" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO=sudo; fi; fi; "
+                    "$SUDO ipset flush m1m_guardian 2>/dev/null || true; "
+                    "$SUDO ipset flush m1m_guardian6 2>/dev/null || true; "
+                    "$SUDO nft list set inet filter m1m_guardian >/dev/null 2>&1 && $SUDO nft flush set inet filter m1m_guardian || true; "
+                    "$SUDO nft list set inet filter m1m_guardian6 >/dev/null 2>&1 && $SUDO nft flush set inet filter m1m_guardian6 || true; "
+                    "true"
+                )
+                await run_ssh(n, script)
+            except Exception as e:
+                log.debug("flush node error %s: %s", n.name, e)
+        if self.nodes:
+            await asyncio.gather(*[_flush_node(n) for n in self.nodes])
+        # clear cache and show page 0
+        self.banned_cache.clear(); self._banned_page[chat_id]=0
+        await self._send(f"✅ {deleted} کلید از Redis حذف شد و ست‌ها پاکسازی شدند.", chat_id=chat_id)
+        await self._menu_banned(chat_id, page=0)
 
     # ---------------- submenus ----------------
     def _find_node(self,cfg,name):
@@ -565,20 +574,32 @@ class TelegramBotPoller:
         else:
             await self._send("سشن‌های فعال:", self._kb(rows), chat_id=chat_id)
 
-    async def _menu_banned(self, chat_id:str):
+    async def _menu_banned(self, chat_id:str, page:int=0):
         if not self.store:
             await self._send("Store در دسترس نیست.", chat_id=chat_id); return
-        banned = await self.store.list_banned()
-        self.banned_cache={ip:ttl for ip,ttl in banned}
+        banned = await self.store.list_banned(limit=1000)
+        total=len(banned); page_size=20
+        max_page = (total-1)//page_size if total>0 else 0
+        page = min(max(0,page), max_page)
+        start=page*page_size; end=min(total, start+page_size)
+        self.banned_cache={ip:ttl for ip,ttl in banned[start:end]}
         rows=[]
-        for ip,ttl in banned[:40]:
-            mins=max(0,int(ttl/60)) if ttl else 0
+        for ip,ttl in banned[start:end]:
+            mins=max(0,int((ttl or 0)/60))
             rows.append([(f"{ip} ({mins}m)", 'unban:'+ip)])
-        rows.append([('↩️ برگشت','mn_refresh')])
-        if not banned:
+        nav=[]
+        if page>0:
+            nav.append(('⬅️ قبلی', f'bannedpage:{page-1}'))
+        if end<total:
+            nav.append(('بعدی ➡️', f'bannedpage:{page+1}'))
+        if nav:
+            rows.append(nav)
+        rows.append([('🧹 آن‌بن همه','unbanall'),('↩️ برگشت','mn_refresh')])
+        title=f"IP های بن شده (صفحه {page+1}/{max_page+1}, کل {total})"
+        if total==0:
             await self._send("لیست بن خالی است.", self._kb([[('↩️','mn_refresh')]]), chat_id=chat_id)
         else:
-            await self._send("IP های بن شده (برای آنبن بزن):", self._kb(rows), chat_id=chat_id)
+            await self._send(title, self._kb(rows), chat_id=chat_id)
 
     async def _menu_status(self, chat_id:str):
         cfg=self.load(self.cfg_path)

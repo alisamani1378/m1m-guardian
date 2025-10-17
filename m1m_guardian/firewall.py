@@ -4,6 +4,7 @@ from .nodes import NodeSpec, _ssh_base
 SET_V4 = "m1m_guardian"
 SET_V6 = "m1m_guardian6"
 _RULE_ENSURED: set[str] = set()
+MAX_PENDING = 20000  # backpressure cap per node
 
 def _is_ipv6(ip: str) -> bool:
     try:
@@ -68,9 +69,9 @@ case "$BACKEND" in
     IPT6=$(command -v ip6tables-nft || command -v ip6tables || command -v ip6tables-legacy || true)
     if [ -z "$IPT" ] && [ -z "$IPT6" ]; then exit 0; fi
 
-    # create timed sets with large capacity (timeout 0 => elements themselves have TTL)
-    $SUDO ipset create {SET_V4} hash:ip timeout 0 hashsize 16384 maxelem 1048576 -exist
-    $SUDO ipset create {SET_V6} hash:ip family inet6 timeout 0 hashsize 16384 maxelem 1048576 -exist
+    # create timed sets with large capacity only if missing (suppress stderr to avoid noise)
+    $SUDO ipset list {SET_V4} >/dev/null 2>&1 || $SUDO ipset create {SET_V4} hash:ip timeout 0 hashsize 16384 maxelem 1048576 2>/dev/null
+    $SUDO ipset list {SET_V6} >/dev/null 2>&1 || $SUDO ipset create {SET_V6} hash:ip family inet6 timeout 0 hashsize 16384 maxelem 1048576 2>/dev/null
 
     # IPv4 rules (prefer DOCKER-USER if exists)
     if [ -n "$IPT" ]; then
@@ -146,10 +147,10 @@ case "$BACKEND" in
     ( command -v ipset >/dev/null 2>&1 ) || exit 1
     # ensure set exists (timed)
     if [ {1 if is_v6 else 0} -eq 1 ]; then
-      $SUDO ipset create {SET_V6} hash:ip family inet6 timeout 0 -exist
+      $SUDO ipset list {SET_V6} >/dev/null 2>&1 || $SUDO ipset create {SET_V6} hash:ip family inet6 timeout 0 2>/dev/null
       $SUDO ipset add {SET_V6} {_q(ip)} timeout {int(seconds)} -exist
     else
-      $SUDO ipset create {SET_V4} hash:ip timeout 0 -exist
+      $SUDO ipset list {SET_V4} >/dev/null 2>&1 || $SUDO ipset create {SET_V4} hash:ip timeout 0 2>/dev/null
       $SUDO ipset add {SET_V4} {_q(ip)} timeout {int(seconds)} -exist
     fi
   ;;
@@ -298,9 +299,18 @@ async def schedule_ban(spec: NodeSpec, ip: str, seconds: int) -> bool:
     await ensure_rule(spec)
     st = await _ensure_worker(spec)
     async with st.lock:
-        # de-duplicate and keep max TTL (extend if needed)
+        # backpressure: cap pending size; only refresh TTL for existing items when full
         cur = st.pending.get(ip)
-        if cur is None or seconds > cur.ttl:
+        if cur is not None:
+            if seconds > cur.ttl:
+                cur.ttl = seconds
+        else:
+            if len(st.pending) >= MAX_PENDING:
+                # overflow: drop this new IP to avoid unbounded growth
+                if st.last_report == 0.0 or (asyncio.get_event_loop().time() - st.last_report) > 5.0:
+                    st.last_report = asyncio.get_event_loop().time()
+                    print(f"[guardian.batch] node={spec.name} pending_overflow size={len(st.pending)} cap={MAX_PENDING} dropping_new=true")
+                return False
             st.pending[ip] = _BanItem(ip, seconds)
         st.event.set()
     return True
@@ -339,17 +349,12 @@ async def _apply_batch(spec: NodeSpec, items: list[_BanItem], st: _WorkerState):
     v4 = [it for it in items if ipaddress.ip_address(it.ip).version == 4]
     v6 = [it for it in items if ipaddress.ip_address(it.ip).version == 6]
 
-    # build remote script once (backend auto-detect inside)
-    # For iptables backend: use ipset restore -exist to add elements in batch
-    # For nft backend: use nft -f with batched add/delete to update TTLs
+    # For iptables backend: ipset restore payload only includes adds; create sets separately
     def _ipset_restore_payload():
-        lines = []
-        # big capacity to avoid maxelem/hashsize issues
-        lines.append(f"create {SET_V4} hash:ip timeout 0 hashsize 16384 maxelem 1048576 -exist")
+        lines: list[str] = []
         if v4:
             for it in v4:
                 lines.append(f"add {SET_V4} {it.ip} timeout {it.ttl} -exist")
-        lines.append(f"create {SET_V6} hash:ip family inet6 timeout 0 hashsize 16384 maxelem 1048576 -exist")
         if v6:
             for it in v6:
                 lines.append(f"add {SET_V6} {it.ip} timeout {it.ttl} -exist")
@@ -357,12 +362,10 @@ async def _apply_batch(spec: NodeSpec, items: list[_BanItem], st: _WorkerState):
 
     def _nft_batch_script():
         parts = []
-        # ensure table/sets
         parts.append("$SUDO nft list table inet filter >/dev/null 2>&1 || $SUDO nft add table inet filter")
         parts.append(f"$SUDO nft list set inet filter {SET_V4} >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V4} '{{ type ipv4_addr; timeout 0s; flags timeout; }}'")
         parts.append(f"$SUDO nft list set inet filter {SET_V6} >/dev/null 2>&1 || $SUDO nft add set inet filter {SET_V6} '{{ type ipv6_addr; timeout 0s; flags timeout; }}'")
         if v4:
-            # delete to ensure TTL refresh, ignore errors
             del_lines = "; ".join([f"$SUDO nft delete element inet filter {SET_V4} \"{{ {it.ip} }}\" 2>/dev/null || true" for it in v4])
             if del_lines:
                 parts.append(del_lines)
@@ -385,16 +388,18 @@ async def _apply_batch(spec: NodeSpec, items: list[_BanItem], st: _WorkerState):
 
     remote = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
 BACKEND=$({_remote_detect_backend()})
-# ensure DOCKER-USER/INPUT rules exist (once)
-true  # assumed ensured by ensure_rule earlier
+true
 case "$BACKEND" in
   "IPTABLES")
     if ! command -v ipset >/dev/null 2>&1; then exit 1; fi
+    # ensure sets exist (silent if already there)
+    $SUDO ipset list {SET_V4} >/dev/null 2>&1 || $SUDO ipset create {SET_V4} hash:ip timeout 0 hashsize 16384 maxelem 1048576 2>/dev/null
+    $SUDO ipset list {SET_V6} >/dev/null 2>&1 || $SUDO ipset create {SET_V6} hash:ip family inet6 timeout 0 hashsize 16384 maxelem 1048576 2>/dev/null
     PAYLOAD=$(cat <<'__EOF__'
 {_ipset_restore_payload()}
 __EOF__
 )
-    echo "$PAYLOAD" | $SUDO ipset restore -exist
+    if [ -n "$PAYLOAD" ]; then echo "$PAYLOAD" | $SUDO ipset restore -exist; fi
   ;;
   "NFT")
     { _nft_batch_script() }

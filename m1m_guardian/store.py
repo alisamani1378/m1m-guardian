@@ -72,6 +72,25 @@ class Store:
     async def unmark_banned(self, ip:str):
         await self.r.delete(f"banned:{ip}")
 
+    async def unmark_all_banned(self) -> int:
+        """Delete all banned:* keys. Returns count of deleted keys (best-effort)."""
+        total_deleted=0
+        cursor=0
+        while True:
+            cursor, keys = await self.r.scan(cursor=cursor, match='banned:*', count=500)
+            if keys:
+                pipe=self.r.pipeline()
+                for k in keys:
+                    pipe.delete(k)
+                try:
+                    res=await pipe.execute()
+                    total_deleted += sum(1 for r in res if (isinstance(r,int) and r>0) or r==True)
+                except Exception:
+                    pass
+            if cursor==0:
+                break
+        return total_deleted
+
     async def get_all_nodes(self)->list[str]:
         # اختیاری: می‌تواند برای cross-node ban استفاده شود
         return []
