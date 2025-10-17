@@ -20,7 +20,8 @@ async def ensure_rule(spec:NodeSpec, force:bool=False):
         return
     inner = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
 (command -v ipset >/dev/null 2>&1) || ( $SUDO apt-get update -y >/dev/null 2>&1 && $SUDO apt-get install -y ipset >/dev/null 2>&1 ) || ( $SUDO apk add --no-cache ipset >/dev/null 2>&1 ) || ( $SUDO yum install -y ipset >/dev/null 2>&1 ) || true
-IPT=$(command -v iptables-legacy || command -v iptables || true)
+# Prefer iptables-nft or the system iptables wrapper before falling back to iptables-legacy
+IPT=$(command -v iptables-nft || command -v iptables || command -v iptables-legacy || true)
 [ -z "$IPT" ] && exit 0
 $SUDO ipset create {SET_NAME} hash:ip timeout 0 -exist
 $IPT -C INPUT   -m set --match-set {SET_NAME} src -j DROP 2>/dev/null || $SUDO $IPT -I INPUT 1   -m set --match-set {SET_NAME} src -j DROP
@@ -38,7 +39,8 @@ async def ban_ip(spec:NodeSpec, ip:str, seconds:int)->bool:
     """Add IP to set & flush conntrack. Returns True if ipset membership confirmed."""
     conntrack_block = _cmd_flush_all(ip)
     add_cmd = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
-IPT=$(command -v iptables-legacy || command -v iptables || true)
+# Prefer iptables-nft or the system iptables wrapper before falling back to iptables-legacy
+IPT=$(command -v iptables-nft || command -v iptables || command -v iptables-legacy || true)
 [ -z "$IPT" ] && exit 0
 ( $SUDO ipset add {SET_NAME} {shlex.quote(ip)} timeout {int(seconds)} -exist 2>/dev/null || ( $SUDO ipset create {SET_NAME} hash:ip timeout 0 -exist 2>/dev/null && $SUDO ipset add {SET_NAME} {shlex.quote(ip)} timeout {int(seconds)} -exist 2>/dev/null ) ) || true
 {conntrack_block}
