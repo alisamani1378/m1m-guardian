@@ -18,7 +18,15 @@ class NodeSpec:
 
 def _ssh_base(spec:NodeSpec)->List[str]:
     # Rebuild to drop BatchMode when password auth is used (sshpass needs prompts allowed)
-    opts=["-o","StrictHostKeyChecking=no","-o","ServerAliveInterval=30","-o","ServerAliveCountMax=3"]
+    opts=[
+        "-o","StrictHostKeyChecking=no",
+        "-o","ServerAliveInterval=30",
+        "-o","ServerAliveCountMax=3",
+        "-o","ControlMaster=auto",
+        "-o","ControlPersist=60s",
+        "-o","ControlPath=~/.ssh/cm-%r@%h:%p",
+        "-o","ConnectTimeout=8",
+    ]
     if not spec.ssh_pass:  # only safe for key auth
         opts=["-o","BatchMode=yes"]+opts
     common=["ssh", *opts, "-p", str(spec.ssh_port), f"{spec.ssh_user}@{spec.host}"]

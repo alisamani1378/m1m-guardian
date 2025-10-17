@@ -1,7 +1,7 @@
 import asyncio, logging, time
 from .nodes import NodeSpec, stream_logs, run_ssh  # added run_ssh import
 from .parser import parse_line
-from .firewall import ensure_rule, ban_ip
+from .firewall import ensure_rule, schedule_ban
 from .notify import TelegramNotifier
 
 log = logging.getLogger("guardian.watcher")
@@ -136,7 +136,7 @@ class NodeWatcher:
                         for node in self.all_nodes:
                             try:
                                 await ensure_rule(node)
-                                ok = await ban_ip(node, old_ip, self.ban_minutes*60)
+                                ok = await schedule_ban(node, old_ip, self.ban_minutes*60)
                                 (success_nodes if ok else failed_nodes).append(node.name)
                             except Exception as e:
                                 failed_nodes.append(node.name)
