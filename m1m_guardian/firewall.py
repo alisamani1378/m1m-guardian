@@ -56,21 +56,31 @@ case "$BACKEND" in
       ( $SUDO yum install -y ipset >/dev/null 2>&1 ) || true
 
     IPT=$(command -v iptables-nft || command -v iptables || command -v iptables-legacy || true)
-    [ -z "$IPT" ] && exit 0
+    IPT6=$(command -v ip6tables-nft || command -v ip6tables || command -v ip6tables-legacy || true)
+    if [ -z "$IPT" ] && [ -z "$IPT6" ]; then exit 0; fi
 
     # create timed sets (timeout 0 => عنصرها تایم‌دار می‌شوند)
     $SUDO ipset create {SET_V4} hash:ip timeout 0 -exist
     $SUDO ipset create {SET_V6} hash:ip family inet6 timeout 0 -exist
 
-    # prefer DOCKER-USER if exists; otherwise INPUT/FORWARD
-    if $IPT -S DOCKER-USER >/dev/null 2>&1; then
-      $IPT -C DOCKER-USER -m set --match-set {SET_V4} src -j DROP 2>/dev/null || $SUDO $IPT -I DOCKER-USER 1 -m set --match-set {SET_V4} src -j DROP
-      $IPT -C DOCKER-USER -m set --match-set {SET_V6} src -j DROP 2>/dev/null || $SUDO $IPT -I DOCKER-USER 1 -m set --match-set {SET_V6} src -j DROP
-    else
-      $IPT -C INPUT   -m set --match-set {SET_V4} src -j DROP 2>/dev/null || $SUDO $IPT -I INPUT   1 -m set --match-set {SET_V4} src -j DROP
-      $IPT -C FORWARD -m set --match-set {SET_V4} src -j DROP 2>/dev/null || $SUDO $IPT -I FORWARD 1 -m set --match-set {SET_V4} src -j DROP
-      $IPT -C INPUT   -m set --match-set {SET_V6} src -j DROP 2>/dev/null || $SUDO $IPT -I INPUT   1 -m set --match-set {SET_V6} src -j DROP
-      $IPT -C FORWARD -m set --match-set {SET_V6} src -j DROP 2>/dev/null || $SUDO $IPT -I FORWARD 1 -m set --match-set {SET_V6} src -j DROP
+    # IPv4 rules (prefer DOCKER-USER if exists)
+    if [ -n "$IPT" ]; then
+      if $IPT -S DOCKER-USER >/dev/null 2>&1; then
+        $IPT -C DOCKER-USER -m set --match-set {SET_V4} src -j DROP 2>/dev/null || $SUDO $IPT -I DOCKER-USER 1 -m set --match-set {SET_V4} src -j DROP
+      else
+        $IPT -C INPUT   -m set --match-set {SET_V4} src -j DROP 2>/dev/null || $SUDO $IPT -I INPUT   1 -m set --match-set {SET_V4} src -j DROP
+        $IPT -C FORWARD -m set --match-set {SET_V4} src -j DROP 2>/dev/null || $SUDO $IPT -I FORWARD 1 -m set --match-set {SET_V4} src -j DROP
+      fi
+    fi
+
+    # IPv6 rules using ip6tables (prefer DOCKER-USER if exists)
+    if [ -n "$IPT6" ]; then
+      if $IPT6 -S DOCKER-USER >/dev/null 2>&1; then
+        $IPT6 -C DOCKER-USER -m set --match-set {SET_V6} src -j DROP 2>/dev/null || $SUDO $IPT6 -I DOCKER-USER 1 -m set --match-set {SET_V6} src -j DROP
+      else
+        $IPT6 -C INPUT   -m set --match-set {SET_V6} src -j DROP 2>/dev/null || $SUDO $IPT6 -I INPUT   1 -m set --match-set {SET_V6} src -j DROP
+        $IPT6 -C FORWARD -m set --match-set {SET_V6} src -j DROP 2>/dev/null || $SUDO $IPT6 -I FORWARD 1 -m set --match-set {SET_V6} src -j DROP
+      fi
     fi
   ;;
   "NFT")
