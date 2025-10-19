@@ -89,7 +89,6 @@ class TelegramLogHandler(logging.Handler):
             return None
         if "hostkey rotated" in low:
             # patterns we log: hostkey rotated node=X host=H fingerprint=F action=detected|auto-cleared status=accepted|retry_failed|remove_failed rc=?
-            import re
             host=re.search(r"host=([^\s]+)", raw)
             fp=re.search(r"fingerprint=([^\s]+)", raw)
             act=re.search(r"action=([^\s]+)", raw)
@@ -132,6 +131,13 @@ class TelegramLogHandler(logging.Handler):
         self._last[key]=now
         try:
             loop=asyncio.get_running_loop()
+            # اگر پیام بن IP است، دکمه «آنبن» اضافه کن
+            if "banned old ip=" in low:
+                m_ip=re.search(r"ip=([0-9A-Fa-f:.]+)", raw_msg)
+                ip=m_ip.group(1) if m_ip else None
+                if ip:
+                    loop.create_task(self.notifier.send_with_inline(formatted, [[('آنبن', f'unban_now:{ip}')]]))
+                    return
             # اگر پیام خطا/هشدار است دکمه ویرایش نود بفرست
             if (formatted.startswith('❌') or formatted.startswith('⚠️')) and node and node!='?':
                 loop.create_task(self.notifier.send_with_inline(formatted, [[('✏️ ویرایش نود', f'node:{node}')]]))

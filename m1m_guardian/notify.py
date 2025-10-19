@@ -478,6 +478,11 @@ class TelegramBotPoller:
             ip=data.split(':',1)[1]
             await self._send(f"آنبن IP {ip}?", self._kb([[('✅ بله','unbanconfirm:'+ip),("❌ خیر","mn_banned")]]), chat_id=chat_id)
             return
+        # NEW: immediate unban without confirmation (used by inline button under ban report)
+        if data.startswith('unban_now:'):
+            ip=data.split(':',1)[1]
+            await self._perform_unban(ip, chat_id)
+            return
         # settings
         if data=='set_edit_banmin':
             self.state[chat_id]={'kind':'edit_setting_banmin'}

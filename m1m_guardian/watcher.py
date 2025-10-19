@@ -153,7 +153,15 @@ class NodeWatcher:
                             msg = (f"🚫 *بن IP*\n" f"IP: `{old_ip}`\n" f"کاربر: `{display_email}`\n" f"اینباند: `{inbound}`\n" f"نودها: {nodes_list}\n" f"مدت: {self.ban_minutes} دقیقه")
                             if failed_nodes:
                                 msg += f"\nنودهای ناموفق: {', '.join(failed_nodes)}"
-                            await self._notify(msg)
+                            # send with inline Unban button if notifier exists
+                            if self.notifier and getattr(self.notifier, 'enabled', False):
+                                try:
+                                    await self.notifier.send_with_inline(msg, [[('آنبن', f'unban_now:{old_ip}')]])
+                                except Exception:
+                                    # fallback to plain send
+                                    await self._notify(msg)
+                            else:
+                                await self._notify(msg)
                 log.warning("log stream ended for %s, reconnecting...", self.spec.name)
             except Exception as e:
                 log.error("watcher error on %s: %s", self.spec.name, e)
