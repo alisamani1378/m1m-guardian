@@ -1,4 +1,4 @@
-import asyncio, logging, time
+import asyncio, logging, time, subprocess
 from .nodes import NodeSpec, stream_logs, run_ssh  # added run_ssh import
 from .parser import parse_line
 from .firewall import ensure_rule, schedule_ban
@@ -32,6 +32,9 @@ class NodeWatcher:
         self._ban_batch_window = 5.0
         # maximum bans to include in one message before forcing a flush
         self._ban_batch_max = 10
+        # NEW: track last time we attempted to fix known_hosts for this node
+        self._last_known_hosts_fix: float = 0.0
+        self._known_hosts_fix_cooldown: float = 300.0  # seconds
 
     async def _notify(self, text:str):
         if self.notifier:
@@ -177,6 +180,41 @@ class NodeWatcher:
             self._fd_window_start=now
             self._fd_reboot_scheduled_at=0.0
 
+    async def _maybe_fix_known_hosts(self, error_line: str):
+        """Detect SSH host key change warning and auto-remove offending key from known_hosts.
+
+        This looks for lines like:
+        "Offending ECDSA key in /root/.ssh/known_hosts:24" and the host name,
+        then runs: ssh-keygen -f '/root/.ssh/known_hosts' -R 'host'.
+        """
+        # only run occasionally to avoid spam
+        now = time.time()
+        if (now - self._last_known_hosts_fix) < self._known_hosts_fix_cooldown:
+            return
+        host = self.spec.host if hasattr(self.spec, "host") else None
+        if not host:
+            return
+        # simple heuristic: line must mention known_hosts and the host name
+        if "known_hosts" not in error_line or host not in error_line:
+            return
+        self._last_known_hosts_fix = now
+        cmd = [
+            "ssh-keygen",
+            "-f",
+            "/root/.ssh/known_hosts",
+            "-R",
+            host,
+        ]
+        log.warning("attempting to auto-fix known_hosts for node=%s host=%s", self.spec.name, host)
+        try:
+            # run synchronously in a thread to avoid blocking event loop
+            def _run_cmd():
+                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            await asyncio.to_thread(_run_cmd)
+            await self._notify(f"🛠 کلید قدیمی SSH برای نود {self.spec.name} (host={host}) از known_hosts حذف شد تا اتصال مجدد برقرار شود.")
+        except Exception as e:
+            log.warning("auto-fix known_hosts failed node=%s host=%s err=%s", self.spec.name, host, e)
+
     async def run(self):
         if not self._ensured:
             await ensure_rule(self.spec); self._ensured=True
@@ -192,6 +230,12 @@ class NodeWatcher:
                     if now - self._last_stat > 60:
                         log.debug("stats node=%s lines=%d parsed=%d", self.spec.name, self._lines, self._parsed)
                         self._last_stat=now; self._lines=0; self._parsed=0
+                    # detect SSH host key change warnings coming from wrapper/SSH
+                    if "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED" in line or "Offending" in line and "known_hosts" in line:
+                        # try to repair known_hosts automatically for this node
+                        await self._maybe_fix_known_hosts(line)
+                        # continue; no need to parse this as traffic log
+                        continue
                     if line.startswith('[guardian-stream]'):
                         low=line.lower()
                         if 'follow pid=' in low and not self._up_notified:
