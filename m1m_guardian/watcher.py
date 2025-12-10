@@ -1,5 +1,5 @@
 import asyncio, logging, time, subprocess
-from .nodes import NodeSpec, stream_logs, run_ssh  # added run_ssh import
+from .nodes import NodeSpec, stream_logs, run_ssh
 from .parser import parse_line
 from .firewall import ensure_rule, schedule_ban
 from .notify import TelegramNotifier
@@ -24,7 +24,7 @@ class NodeWatcher:
         self._lines=0; self._parsed=0; self._last_stat=time.time()
         # NEW: scheduled reboot time after threshold grace period
         self._fd_reboot_scheduled_at=0.0
-        # NEW: ban notification batching
+        # NEW: ban notification batching (always aggregated; no per-ban immediate send)
         self._ban_batch: list[dict] = []
         self._ban_batch_last_sent: float = 0.0
         self._ban_batch_lock = asyncio.Lock()
@@ -32,7 +32,7 @@ class NodeWatcher:
         self._ban_batch_window = 5.0
         # maximum bans to include in one message before forcing a flush
         self._ban_batch_max = 10
-        # NEW: track last time we attempted to fix known_hosts for this node
+        # known_hosts auto-fix state
         self._last_known_hosts_fix: float = 0.0
         self._known_hosts_fix_cooldown: float = 300.0  # seconds
 
@@ -47,6 +47,7 @@ class NodeWatcher:
         """Send a single Telegram message summarizing one or more bans.
 
         Each item is a dict with keys: ip, email, inbound, success_nodes, failed_nodes.
+        This is only called from the batcher, never directly per-ban.
         """
         if not ban_items:
             return
@@ -74,21 +75,7 @@ class NodeWatcher:
             lines.append(block)
         text = "\n\n".join(lines)
 
-        # If فقط یک آیتم است و notifier پشتیبانی دکمه inline دارد، مثل قبل رفتار کن
-        if len(ban_items) == 1 and self.notifier and getattr(self.notifier, "enabled", False):
-            item = ban_items[0]
-            ip = item["ip"]
-            try:
-                await self.notifier.send_with_inline(
-                    text,
-                    [[("آن‌بن", f"unban_now:{ip}")]],
-                )
-                return
-            except Exception:
-                # fall back to plain send
-                await self._notify(text)
-                return
-        # otherwise فقط متن خلاصه بفرست
+        # Always send as a simple text message (no per-IP inline buttons here)
         await self._notify(text)
 
     async def _add_ban_to_batch(self, ip:str, email:str, inbound:str, success_nodes:list[str], failed_nodes:list[str]):
@@ -119,6 +106,9 @@ class NodeWatcher:
             should_flush = False
             if len(self._ban_batch) >= self._ban_batch_max:
                 should_flush = True
+            elif self._ban_batch_last_sent == 0.0:
+                # first batch ever: just send after window passes
+                pass
             elif (now - self._ban_batch_last_sent) >= self._ban_batch_window:
                 # last sent is old enough, ok to send this batch
                 should_flush = True
