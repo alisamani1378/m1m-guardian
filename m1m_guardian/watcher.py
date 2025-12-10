@@ -24,6 +24,14 @@ class NodeWatcher:
         self._lines=0; self._parsed=0; self._last_stat=time.time()
         # NEW: scheduled reboot time after threshold grace period
         self._fd_reboot_scheduled_at=0.0
+        # NEW: ban notification batching
+        self._ban_batch: list[dict] = []
+        self._ban_batch_last_sent: float = 0.0
+        self._ban_batch_lock = asyncio.Lock()
+        # how long to accumulate bans before sending (seconds)
+        self._ban_batch_window = 5.0
+        # maximum bans to include in one message before forcing a flush
+        self._ban_batch_max = 10
 
     async def _notify(self, text:str):
         if self.notifier:
@@ -31,6 +39,101 @@ class NodeWatcher:
                 await self.notifier.send(text)
             except Exception:
                 pass
+
+    async def _notify_ban_immediate(self, ban_items:list[dict]):
+        """Send a single Telegram message summarizing one or more bans.
+
+        Each item is a dict with keys: ip, email, inbound, success_nodes, failed_nodes.
+        """
+        if not ban_items:
+            return
+        # Build summary text in Farsi with Markdown formatting
+        lines = []
+        header = "🚫 *بن IP ها*" if len(ban_items) > 1 else "🚫 *بن IP*"
+        lines.append(header)
+        for idx, item in enumerate(ban_items, start=1):
+            prefix = f"{idx}. " if len(ban_items) > 1 else ""
+            ip = item["ip"]
+            email = item["email"]
+            inbound = item["inbound"]
+            success_nodes = item["success_nodes"] or ["-"]
+            failed_nodes = item["failed_nodes"]
+            nodes_list = ", ".join(success_nodes)
+            block = (
+                f"{prefix}IP: `{ip}`\n"
+                f"کاربر: `{email}`\n"
+                f"اینباند: `{inbound}`\n"
+                f"نودها: {nodes_list}\n"
+                f"مدت: {self.ban_minutes} دقیقه"
+            )
+            if failed_nodes:
+                block += f"\nنودهای ناموفق: {', '.join(failed_nodes)}"
+            lines.append(block)
+        text = "\n\n".join(lines)
+
+        # If فقط یک آیتم است و notifier پشتیبانی دکمه inline دارد، مثل قبل رفتار کن
+        if len(ban_items) == 1 and self.notifier and getattr(self.notifier, "enabled", False):
+            item = ban_items[0]
+            ip = item["ip"]
+            try:
+                await self.notifier.send_with_inline(
+                    text,
+                    [[("آن‌بن", f"unban_now:{ip}")]],
+                )
+                return
+            except Exception:
+                # fall back to plain send
+                await self._notify(text)
+                return
+        # otherwise فقط متن خلاصه بفرست
+        await self._notify(text)
+
+    async def _add_ban_to_batch(self, ip:str, email:str, inbound:str, success_nodes:list[str], failed_nodes:list[str]):
+        """Add a ban event to the in-memory batch and flush when needed.
+
+        This reduces Telegram API calls by grouping multiple bans that occur
+        within a short window into a single notification message.
+        """
+        now = time.time()
+        async with self._ban_batch_lock:
+            # normalize email like before (strip leading numeric prefix.)
+            display_email = email
+            if "." in display_email:
+                first, rest = display_email.split(".", 1)
+                if first.isdigit():
+                    display_email = rest
+            self._ban_batch.append(
+                {
+                    "ip": ip,
+                    "email": display_email,
+                    "inbound": inbound,
+                    "success_nodes": list(success_nodes),
+                    "failed_nodes": list(failed_nodes),
+                }
+            )
+
+            # decide if we should flush immediately
+            should_flush = False
+            if len(self._ban_batch) >= self._ban_batch_max:
+                should_flush = True
+            elif (now - self._ban_batch_last_sent) >= self._ban_batch_window:
+                # last sent is old enough, ok to send this batch
+                should_flush = True
+
+            if not should_flush:
+                return
+
+            # take snapshot and clear batch
+            batch = self._ban_batch
+            self._ban_batch = []
+            self._ban_batch_last_sent = now
+
+        # send outside lock
+        try:
+            await self._notify_ban_immediate(batch)
+        except Exception:
+            # ignore send failures (already logged inside notifier)
+            pass
 
     async def _maybe_reboot_for_fd(self):
         """If fd_unreadable repeated threshold times, schedule reboot after 60s grace; cooldown 20m."""
@@ -143,25 +246,8 @@ class NodeWatcher:
                                 log.debug("ban exception node=%s ip=%s err=%s", node.name, old_ip, e)
                         log.warning("banned ip=%s user=%s inbound=%s nodes=%s%s for %dm", old_ip, email, inbound, ','.join(success_nodes) or '-', (f" failed={','.join(failed_nodes)}" if failed_nodes else ''), self.ban_minutes)
                         await self.store.mark_banned(old_ip, self.ban_minutes*60)
-                        display_email=email
-                        if '.' in display_email:
-                            first, rest = display_email.split('.',1)
-                            if first.isdigit():
-                                display_email=rest
-                        if success_nodes:
-                            nodes_list = ', '.join(success_nodes)
-                            msg = (f"🚫 *بن IP*\n" f"IP: `{old_ip}`\n" f"کاربر: `{display_email}`\n" f"اینباند: `{inbound}`\n" f"نودها: {nodes_list}\n" f"مدت: {self.ban_minutes} دقیقه")
-                            if failed_nodes:
-                                msg += f"\nنودهای ناموفق: {', '.join(failed_nodes)}"
-                            # send with inline Unban button if notifier exists
-                            if self.notifier and getattr(self.notifier, 'enabled', False):
-                                try:
-                                    await self.notifier.send_with_inline(msg, [[('آنبن', f'unban_now:{old_ip}')]])
-                                except Exception:
-                                    # fallback to plain send
-                                    await self._notify(msg)
-                            else:
-                                await self._notify(msg)
+                        # NEW: send via batcher instead of per-ban message
+                        await self._add_ban_to_batch(old_ip, email, inbound, success_nodes, failed_nodes)
                 log.warning("log stream ended for %s, reconnecting...", self.spec.name)
             except Exception as e:
                 log.error("watcher error on %s: %s", self.spec.name, e)
