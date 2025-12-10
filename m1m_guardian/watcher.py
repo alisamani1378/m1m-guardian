@@ -26,10 +26,11 @@ class NodeWatcher:
         self._fd_reboot_scheduled_at=0.0
         # NEW: ban notification batching (always aggregated; no per-ban immediate send)
         self._ban_batch: list[dict] = []
-        self._ban_batch_last_sent: float = 0.0
         self._ban_batch_lock = asyncio.Lock()
+        # when first item of current batch was added
+        self._ban_batch_first_ts: float = 0.0
         # how long to accumulate bans before sending (seconds)
-        self._ban_batch_window = 5.0
+        self._ban_batch_window = 15.0
         # maximum bans to include in one message before forcing a flush
         self._ban_batch_max = 10
         # known_hosts auto-fix state
@@ -59,14 +60,12 @@ class NodeWatcher:
             prefix = f"{idx}. " if len(ban_items) > 1 else ""
             ip = item["ip"]
             email = item["email"]
-            inbound = item["inbound"]
             success_nodes = item["success_nodes"] or ["-"]
             failed_nodes = item["failed_nodes"]
             nodes_list = ", ".join(success_nodes)
             block = (
                 f"{prefix}IP: `{ip}`\n"
                 f"کاربر: `{email}`\n"
-                f"اینباند: `{inbound}`\n"
                 f"نودها: {nodes_list}\n"
                 f"مدت: {self.ban_minutes} دقیقه"
             )
@@ -92,6 +91,9 @@ class NodeWatcher:
                 first, rest = display_email.split(".", 1)
                 if first.isdigit():
                     display_email = rest
+            if not self._ban_batch:
+                # first item of a new batch
+                self._ban_batch_first_ts = now
             self._ban_batch.append(
                 {
                     "ip": ip,
@@ -104,22 +106,20 @@ class NodeWatcher:
 
             # decide if we should flush immediately
             should_flush = False
+            # 1) reach max batch size
             if len(self._ban_batch) >= self._ban_batch_max:
                 should_flush = True
-            elif self._ban_batch_last_sent == 0.0:
-                # first batch ever: just send after window passes
-                pass
-            elif (now - self._ban_batch_last_sent) >= self._ban_batch_window:
-                # last sent is old enough, ok to send this batch
+            # 2) timeout window passed from first item
+            elif self._ban_batch_first_ts and (now - self._ban_batch_first_ts) >= self._ban_batch_window:
                 should_flush = True
 
             if not should_flush:
                 return
 
-            # take snapshot and clear batch
-            batch = self._ban_batch
-            self._ban_batch = []
-            self._ban_batch_last_sent = now
+            # take snapshot and clear batch (for this node)
+            batch = list(self._ban_batch)
+            self._ban_batch.clear()
+            self._ban_batch_first_ts = 0.0
 
         # send outside lock
         try:
