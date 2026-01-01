@@ -1,7 +1,7 @@
 import asyncio, json, logging, urllib.request, urllib.parse
 import os, time
 from typing import List, Dict, Tuple
-from .firewall import unban_ip  # removed ensure_rule unused
+from .firewall import unban_ip, ensure_rule  # added ensure_rule for fix firewall
 from .nodes import NodeSpec, run_ssh
 from .config import ensure_defaults  # added
 
@@ -404,6 +404,10 @@ class TelegramBotPoller:
         if data.startswith('node:'):
             name=data.split(':',1)[1]
             await self._show_node(name, chat_id); return
+        # NEW: fix firewall callbacks
+        if data.startswith('nodefixfw:'):
+            name=data.split(':',1)[1]
+            await self._perform_fix_firewall(name, chat_id); return
         # NEW: node reboot callbacks
         if data.startswith('noderebootconfirm:'):
             name=data.split(':',1)[1]
@@ -561,6 +565,7 @@ class TelegramBotPoller:
             [('Port','nodeedit:'+name+':ssh_port'),('Container','nodeedit:'+name+':docker_container')],
             [('AuthPass','nodeauthpass:'+name),('AuthKey','nodeauthkey:'+name)],
             [('AuthKeyText','nodeauthkeytext:'+name)],
+            [('🔥 فیکس فایروال','nodefixfw:'+name)],  # NEW fix firewall button
             [('♻️ ریبوت','nodereboot:'+name)],  # NEW reboot button
             [('❌ حذف','nodedelete:'+name),('⬅️ برگشت','mn_nodes')]
         ]
@@ -748,5 +753,40 @@ class TelegramBotPoller:
                     await self._send(f"⚠️ نتیجه نامشخص (rc={rc}) شاید در حال ریبوت باشد {name}.", chat_id=chat_id)
             except Exception as e:
                 await self._send(f"❌ خطا در ریبوت {name}: {e}", chat_id=chat_id)
+        asyncio.create_task(_do())
+
+    async def _perform_fix_firewall(self, name:str, chat_id:str):
+        """Fix firewall rules on a specific node - creates ipset and iptables rules."""
+        cfg=self.load(self.cfg_path)
+        node=self._find_node(cfg,name)
+        if not node:
+            await self._send("نود یافت نشد.", chat_id=chat_id); return
+        
+        await self._send(f"🔧 در حال فیکس فایروال روی {name}...", chat_id=chat_id)
+        
+        async def _do():
+            try:
+                spec=NodeSpec(node.get('name'), node.get('host'), node.get('ssh_user'), node.get('ssh_port'), node.get('docker_container'), node.get('ssh_key'), node.get('ssh_pass'))
+                
+                # Clear cache to force re-run
+                from .firewall import _RULE_ENSURED
+                key = f"{spec.host}:{spec.ssh_port}"
+                _RULE_ENSURED.discard(key)
+                
+                # Run ensure_rule with force=True
+                await ensure_rule(spec, force=True)
+                
+                # Check if it was added to cache (meaning success)
+                if key in _RULE_ENSURED:
+                    await self._send(f"✅ فایروال نود {name} با موفقیت فیکس شد!\n\n"
+                                    f"• ipset ساخته شد\n"
+                                    f"• قوانین iptables اضافه شد", chat_id=chat_id)
+                else:
+                    await self._send(f"⚠️ فیکس فایروال {name} ناموفق بود.\n"
+                                    f"لاگ رو چک کن:\n"
+                                    f"`journalctl -u m1m-guardian | tail -50`", chat_id=chat_id)
+            except Exception as e:
+                await self._send(f"❌ خطا در فیکس فایروال {name}: {e}", chat_id=chat_id)
+        
         asyncio.create_task(_do())
 
