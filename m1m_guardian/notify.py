@@ -768,23 +768,85 @@ class TelegramBotPoller:
             try:
                 spec=NodeSpec(node.get('name'), node.get('host'), node.get('ssh_user'), node.get('ssh_port'), node.get('docker_container'), node.get('ssh_key'), node.get('ssh_pass'))
                 
-                # Clear cache to force re-run
-                from .firewall import _RULE_ENSURED
-                key = f"{spec.host}:{spec.ssh_port}"
-                _RULE_ENSURED.discard(key)
+                # Run fix script directly and capture output
+                from .nodes import _ssh_base
                 
-                # Run ensure_rule with force=True
-                await ensure_rule(spec, force=True)
+                fix_script = '''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
+echo "=== Checking backend ==="
+BACKEND=""
+IPT=$(command -v iptables-nft || command -v iptables || command -v iptables-legacy || true)
+if [ -n "$IPT" ]; then BACKEND="IPTABLES"; fi
+if [ -z "$BACKEND" ] && command -v nft >/dev/null 2>&1; then BACKEND="NFT"; fi
+echo "Backend: $BACKEND"
+
+if [ "$BACKEND" != "IPTABLES" ]; then
+  echo "ERROR: Only IPTABLES supported"
+  exit 1
+fi
+
+echo "=== Installing ipset if needed ==="
+if ! command -v ipset >/dev/null 2>&1; then
+  echo "Installing ipset..."
+  $SUDO apt-get update -y >/dev/null 2>&1 && $SUDO apt-get install -y ipset >/dev/null 2>&1 || $SUDO yum install -y ipset >/dev/null 2>&1
+fi
+command -v ipset >/dev/null && echo "ipset: OK" || { echo "ipset: FAILED"; exit 1; }
+
+echo "=== Creating ipset ==="
+$SUDO ipset list m1m_guardian >/dev/null 2>&1 || $SUDO ipset create m1m_guardian hash:ip timeout 0 hashsize 16384 maxelem 1048576
+$SUDO ipset list m1m_guardian6 >/dev/null 2>&1 || $SUDO ipset create m1m_guardian6 hash:ip family inet6 timeout 0 hashsize 16384 maxelem 1048576
+echo "ipset: Created"
+
+echo "=== Adding INPUT rules (for host services) ==="
+$IPT -C INPUT -m set --match-set m1m_guardian src -j DROP 2>/dev/null || {
+  $SUDO $IPT -I INPUT 1 -p tcp -m set --match-set m1m_guardian src -j REJECT --reject-with tcp-reset
+  $SUDO $IPT -I INPUT 2 -p udp -m set --match-set m1m_guardian src -j REJECT --reject-with icmp-port-unreachable
+  $SUDO $IPT -I INPUT 3 -m set --match-set m1m_guardian src -j DROP
+  echo "INPUT: Added"
+}
+
+echo "=== Adding DOCKER-USER rules (for containers) ==="
+if $IPT -S DOCKER-USER >/dev/null 2>&1; then
+  $IPT -C DOCKER-USER -m set --match-set m1m_guardian src -j DROP 2>/dev/null || {
+    $SUDO $IPT -I DOCKER-USER 1 -p tcp -m set --match-set m1m_guardian src -j REJECT --reject-with tcp-reset
+    $SUDO $IPT -I DOCKER-USER 2 -p udp -m set --match-set m1m_guardian src -j REJECT --reject-with icmp-port-unreachable
+    $SUDO $IPT -I DOCKER-USER 3 -m set --match-set m1m_guardian src -j DROP
+    echo "DOCKER-USER: Added"
+  }
+else
+  echo "DOCKER-USER: Not found (no Docker)"
+fi
+
+echo "=== Verifying ==="
+INPUT_OK=0; DOCKER_OK=0
+$IPT -S INPUT 2>/dev/null | grep -q "m1m_guardian" && INPUT_OK=1 && echo "INPUT: OK"
+$IPT -S DOCKER-USER 2>/dev/null | grep -q "m1m_guardian" && DOCKER_OK=1 && echo "DOCKER-USER: OK"
+
+if [ "$INPUT_OK" -eq 1 ]; then
+  echo "=== SUCCESS ==="
+else
+  echo "=== FAILED ==="
+  exit 1
+fi
+'''
                 
-                # Check if it was added to cache (meaning success)
-                if key in _RULE_ENSURED:
-                    await self._send(f"✅ فایروال نود {name} با موفقیت فیکس شد!\n\n"
-                                    f"• ipset ساخته شد\n"
-                                    f"• قوانین iptables اضافه شد", chat_id=chat_id)
+                cmd = _ssh_base(spec) + [fix_script]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT
+                )
+                out, _ = await proc.communicate()
+                output = (out or b'').decode(errors='ignore')
+                
+                # Truncate if too long
+                if len(output) > 3000:
+                    output = output[:1500] + "\n...\n" + output[-1500:]
+                
+                if b'=== SUCCESS ===' in out:
+                    await self._send(f"✅ فایروال {name} فیکس شد!\n\n```\n{output}\n```", chat_id=chat_id)
                 else:
-                    await self._send(f"⚠️ فیکس فایروال {name} ناموفق بود.\n"
-                                    f"لاگ رو چک کن:\n"
-                                    f"`journalctl -u m1m-guardian | tail -50`", chat_id=chat_id)
+                    await self._send(f"⚠️ فیکس فایروال {name}:\n\n```\n{output}\n```", chat_id=chat_id)
+                    
             except Exception as e:
                 await self._send(f"❌ خطا در فیکس فایروال {name}: {e}", chat_id=chat_id)
         
