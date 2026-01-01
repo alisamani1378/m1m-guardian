@@ -206,9 +206,10 @@ class NodeWatcher:
             log.warning("auto-fix known_hosts failed node=%s host=%s err=%s", self.spec.name, host, e)
 
     async def run(self):
-        if not self._ensured:
-            await ensure_rule(self.spec); self._ensured=True
-            log.info("ensured firewall on %s", self.spec.name)
+        # DISABLED: auto ensure_rule on startup - now manual via Telegram bot button
+        # if not self._ensured:
+        #     await ensure_rule(self.spec); self._ensured=True
+        #     log.info("ensured firewall on %s", self.spec.name)
 
         backoff=1
         while True:
@@ -272,7 +273,8 @@ class NodeWatcher:
                         success_nodes=[]; failed_nodes=[]
                         for node in self.all_nodes:
                             try:
-                                await ensure_rule(node)
+                                # DISABLED: auto ensure_rule - now manual via Telegram bot button
+                                # await ensure_rule(node)
                                 ok = await schedule_ban(node, old_ip, self.ban_minutes*60)
                                 (success_nodes if ok else failed_nodes).append(node.name)
                             except Exception as e:

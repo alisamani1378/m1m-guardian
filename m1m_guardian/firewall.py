@@ -433,7 +433,8 @@ async def schedule_ban(spec: NodeSpec, ip: str, seconds: int) -> bool:
         ipaddress.ip_address(ip)
     except ValueError:
         return False
-    await ensure_rule(spec)
+    # DISABLED: auto ensure_rule - now manual via Telegram bot button
+    # await ensure_rule(spec)
     st = await _ensure_worker(spec)
     async with st.lock:
         # backpressure: cap pending size; only refresh TTL for existing items when full
