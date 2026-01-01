@@ -34,10 +34,14 @@ if [ -n "$IPT" ]; then BACKEND="IPTABLES"; fi
 if [ -z "$BACKEND" ] && command -v nft >/dev/null 2>&1; then BACKEND="NFT"; fi
 echo "$BACKEND"'''
 
+import logging
+log = logging.getLogger("guardian.firewall")
+
 async def ensure_rule(spec: NodeSpec, force: bool = False):
     """
     Idempotently ensure drop-rules and timed sets exist.
     Supports both iptables(+ipset) and nftables-native.
+    Now with verification and retry logic.
     """
     key = f"{spec.host}:{spec.ssh_port}"
     if not force and key in _RULE_ENSURED:
@@ -149,10 +153,118 @@ case "$BACKEND" in
 esac
 true'''.strip()
 
+    # Execute ensure_rule script
     cmd = _ssh_base(spec) + [inner]
-    p = await asyncio.create_subprocess_exec(*cmd)
-    await p.wait()
-    _RULE_ENSURED.add(key)
+    p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    out, _ = await p.communicate()
+    
+    # Now verify that rules were actually added
+    verify_script = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
+BACKEND=$({_remote_detect_backend()})
+RULES_OK=0
+
+case "$BACKEND" in
+  "IPTABLES")
+    # Check if ipset exists and has our sets
+    if ! command -v ipset >/dev/null 2>&1; then
+      echo "VERIFY_FAIL: ipset not installed"
+      exit 1
+    fi
+    
+    if ! $SUDO ipset list {SET_V4} >/dev/null 2>&1; then
+      echo "VERIFY_FAIL: ipset {SET_V4} not created"
+      exit 1
+    fi
+    
+    IPT=$(command -v iptables-nft || command -v iptables || command -v iptables-legacy || true)
+    if [ -z "$IPT" ]; then
+      echo "VERIFY_FAIL: no iptables found"
+      exit 1
+    fi
+    
+    # Check if rules exist in DOCKER-USER or INPUT/FORWARD
+    if $IPT -S DOCKER-USER 2>/dev/null | grep -q "{SET_V4}"; then
+      RULES_OK=1
+      echo "VERIFY_OK: rules in DOCKER-USER"
+    elif $IPT -S INPUT 2>/dev/null | grep -q "{SET_V4}"; then
+      RULES_OK=1
+      echo "VERIFY_OK: rules in INPUT"
+    elif $IPT -S FORWARD 2>/dev/null | grep -q "{SET_V4}"; then
+      RULES_OK=1
+      echo "VERIFY_OK: rules in FORWARD"
+    fi
+    
+    if [ "$RULES_OK" -eq 0 ]; then
+      echo "VERIFY_FAIL: no iptables rules found for {SET_V4}"
+      # Try to add rules now
+      if $IPT -S DOCKER-USER >/dev/null 2>&1; then
+        echo "VERIFY_FIX: adding rules to DOCKER-USER"
+        $SUDO $IPT -I DOCKER-USER 1 -p tcp -m set --match-set {SET_V4} src -j REJECT --reject-with tcp-reset 2>/dev/null || true
+        $SUDO $IPT -I DOCKER-USER 2 -p udp -m set --match-set {SET_V4} src -j REJECT --reject-with icmp-port-unreachable 2>/dev/null || true
+        $SUDO $IPT -I DOCKER-USER 3 -m set --match-set {SET_V4} src -j DROP 2>/dev/null || true
+      else
+        echo "VERIFY_FIX: adding rules to INPUT/FORWARD"
+        $SUDO $IPT -I INPUT 1 -m set --match-set {SET_V4} src -j DROP 2>/dev/null || true
+        $SUDO $IPT -I FORWARD 1 -m set --match-set {SET_V4} src -j DROP 2>/dev/null || true
+      fi
+      # Verify again
+      if $IPT -S DOCKER-USER 2>/dev/null | grep -q "{SET_V4}" || $IPT -S INPUT 2>/dev/null | grep -q "{SET_V4}"; then
+        echo "VERIFY_FIXED: rules added successfully"
+      else
+        echo "VERIFY_FAIL: could not add rules"
+        exit 1
+      fi
+    fi
+  ;;
+  "NFT")
+    if ! $SUDO nft list set inet filter {SET_V4} >/dev/null 2>&1; then
+      echo "VERIFY_FAIL: nft set {SET_V4} not created"
+      exit 1
+    fi
+    if $SUDO nft list ruleset 2>/dev/null | grep -q "@{SET_V4}"; then
+      echo "VERIFY_OK: nft rules exist"
+    else
+      echo "VERIFY_FAIL: no nft rules for {SET_V4}"
+      exit 1
+    fi
+  ;;
+  *)
+    echo "VERIFY_FAIL: no firewall backend"
+    exit 1
+  ;;
+esac
+echo "VERIFY_COMPLETE"
+'''
+    
+    verify_cmd = _ssh_base(spec) + [verify_script]
+    vp = await asyncio.create_subprocess_exec(*verify_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    vout, _ = await vp.communicate()
+    vtext = (vout or b'').decode(errors='ignore')
+    
+    if b'VERIFY_OK' in vout or b'VERIFY_FIXED' in vout or b'VERIFY_COMPLETE' in vout:
+        log.info("ensure_rule verified node=%s status=ok output=%s", spec.name, vtext.strip()[:200])
+        _RULE_ENSURED.add(key)
+    else:
+        log.error("ensure_rule FAILED node=%s output=%s", spec.name, vtext.strip()[:400])
+        # Don't add to _RULE_ENSURED so it will retry next time
+
+async def force_ensure_all_nodes(nodes: list[NodeSpec]) -> dict[str, bool]:
+    """
+    Force re-run ensure_rule on all nodes and return status dict.
+    Useful for manual verification/fix from manager.
+    """
+    results = {}
+    for node in nodes:
+        key = f"{node.host}:{node.ssh_port}"
+        # Clear cache to force re-run
+        _RULE_ENSURED.discard(key)
+        try:
+            await ensure_rule(node, force=True)
+            results[node.name] = key in _RULE_ENSURED
+        except Exception as e:
+            log.error("force_ensure_all_nodes error node=%s err=%s", node.name, e)
+            results[node.name] = False
+    return results
 
 async def ban_ip(spec: NodeSpec, ip: str, seconds: int) -> bool:
     """Add IP (v4/v6) with TTL to the appropriate set and flush conntrack. Returns True if membership confirmed."""
