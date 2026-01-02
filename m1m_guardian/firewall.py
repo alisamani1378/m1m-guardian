@@ -63,6 +63,12 @@ BACKEND=$({_remote_detect_backend()})
 
 case "$BACKEND" in
   "IPTABLES")
+    # Load required kernel modules (best-effort)
+    $SUDO modprobe ip_set 2>/dev/null || true
+    $SUDO modprobe ip_set_hash_ip 2>/dev/null || true
+    $SUDO modprobe xt_set 2>/dev/null || true
+    $SUDO modprobe nf_conntrack 2>/dev/null || true
+
     # ensure ipset available
     ( command -v ipset >/dev/null 2>&1 ) || \
       ( $SUDO apt-get update -y >/dev/null 2>&1 && $SUDO apt-get install -y ipset >/dev/null 2>&1 ) || \
@@ -199,19 +205,21 @@ case "$BACKEND" in
       # Try to add rules now
       if $IPT -S DOCKER-USER >/dev/null 2>&1; then
         echo "VERIFY_FIX: adding rules to DOCKER-USER"
-        $SUDO $IPT -I DOCKER-USER 1 -p tcp -m set --match-set {SET_V4} src -j REJECT --reject-with tcp-reset 2>/dev/null || true
-        $SUDO $IPT -I DOCKER-USER 2 -p udp -m set --match-set {SET_V4} src -j REJECT --reject-with icmp-port-unreachable 2>/dev/null || true
-        $SUDO $IPT -I DOCKER-USER 3 -m set --match-set {SET_V4} src -j DROP 2>/dev/null || true
+        $SUDO $IPT -I DOCKER-USER 1 -m set --match-set {SET_V4} src -j DROP 2>&1 || true
       else
         echo "VERIFY_FIX: adding rules to INPUT/FORWARD"
-        $SUDO $IPT -I INPUT 1 -m set --match-set {SET_V4} src -j DROP 2>/dev/null || true
-        $SUDO $IPT -I FORWARD 1 -m set --match-set {SET_V4} src -j DROP 2>/dev/null || true
+        $SUDO $IPT -I INPUT 1 -m set --match-set {SET_V4} src -j DROP 2>&1 || true
+        $SUDO $IPT -I FORWARD 1 -m set --match-set {SET_V4} src -j DROP 2>&1 || true
       fi
+      sleep 1
       # Verify again
-      if $IPT -S DOCKER-USER 2>/dev/null | grep -q "{SET_V4}" || $IPT -S INPUT 2>/dev/null | grep -q "{SET_V4}"; then
+      if $IPT -S DOCKER-USER 2>/dev/null | grep -q "{SET_V4}" || $IPT -S INPUT 2>/dev/null | grep -q "{SET_V4}" || $IPT -S FORWARD 2>/dev/null | grep -q "{SET_V4}"; then
         echo "VERIFY_FIXED: rules added successfully"
       else
         echo "VERIFY_FAIL: could not add rules"
+        echo "DEBUG: iptables=$IPT"
+        $IPT -S INPUT 2>&1 | head -5 || true
+        $SUDO ipset list {SET_V4} 2>&1 | head -5 || true
         exit 1
       fi
     fi
