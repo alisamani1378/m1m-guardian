@@ -47,7 +47,17 @@ async def ensure_rule(spec: NodeSpec, force: bool = False):
     if not force and key in _RULE_ENSURED:
         return
 
-    inner = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo -n"; fi; fi
+    inner = f'''SUDO=""
+# Check if we need sudo and if it works without password
+if [ "$(id -u)" != 0 ]; then
+  if command -v sudo >/dev/null 2>&1; then
+    if sudo -n true 2>/dev/null; then
+      SUDO="sudo -n"
+    else
+      echo "[guardian] WARNING: sudo requires password, some operations may fail"
+    fi
+  fi
+fi
 
 # Optionally bump nf_conntrack_max if too low (best-effort)
 if [ -r /proc/sys/net/netfilter/nf_conntrack_max ]; then
@@ -165,7 +175,15 @@ true'''.strip()
     out, _ = await p.communicate()
     
     # Now verify that rules were actually added
-    verify_script = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo -n"; fi; fi
+    verify_script = f'''SUDO=""
+if [ "$(id -u)" != 0 ]; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    SUDO="sudo -n"
+  else
+    echo "VERIFY_FAIL: not root and sudo without password not available"
+    exit 1
+  fi
+fi
 BACKEND=$({_remote_detect_backend()})
 RULES_OK=0
 
