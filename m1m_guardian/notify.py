@@ -1,7 +1,7 @@
 import asyncio, json, logging, urllib.request, urllib.parse
 import os, time
 from typing import List, Dict, Tuple
-from .firewall import unban_ip, check_firewall_status, force_ensure_all_nodes
+from .firewall import unban_ip, check_firewall_status, force_ensure_all_nodes, ensure_rule
 from .nodes import NodeSpec, run_ssh
 from .config import ensure_defaults  # added
 
@@ -694,6 +694,25 @@ class TelegramBotPoller:
                 return
             pid=text.split(':',1)[1]
             await self._send(f"✅ نود {node_name}: متصل و در حال استریم (PID={pid}).", chat_id=chat_id)
+
+            # Auto check and fix firewall for new node
+            await self._send(f"🔥 در حال بررسی فایروال نود {node_name}...", chat_id=chat_id)
+            try:
+                fw_status = await check_firewall_status(spec)
+                if fw_status['ok']:
+                    await self._send(f"✅ فایروال {node_name}: OK ({fw_status['backend']})", chat_id=chat_id)
+                else:
+                    await self._send(f"⚠️ فایروال {node_name}: نیاز به فیکس دارد، در حال اصلاح...", chat_id=chat_id)
+                    await ensure_rule(spec, force=True)
+                    # Re-check
+                    fw_status2 = await check_firewall_status(spec)
+                    if fw_status2['ok']:
+                        await self._send(f"✅ فایروال {node_name}: فیکس شد!", chat_id=chat_id)
+                    else:
+                        await self._send(f"❌ فایروال {node_name}: فیکس نشد. از دکمه 🔧 فیکس فایروال استفاده کنید.", chat_id=chat_id)
+            except Exception as e:
+                await self._send(f"⚠️ خطا در بررسی فایروال {node_name}: {e}", chat_id=chat_id)
+
         except Exception as e:
             await self._send(f"❌ نود {node_name}: خطای داخلی تست اتصال: {e}", chat_id=chat_id)
 

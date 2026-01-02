@@ -5,6 +5,7 @@ from .nodes import NodeSpec
 from .watcher import NodeWatcher
 from .notify import TelegramNotifier, TelegramBotPoller
 from .log_forward import install_telegram_log_forward
+from .firewall import check_firewall_status, ensure_rule
 
 log = logging.getLogger("guardian.main")
 
@@ -71,6 +72,53 @@ async def amain(config_path:str, log_level:str):
     if not nodes:
         log.error("No nodes configured. Use auto.sh -> option 2 (Config menu) to add a node.")
         return
+
+    # Auto check and fix firewall on all nodes at startup
+    log.info("Checking firewall status on %d nodes...", len(nodes))
+    firewall_results = []
+    for spec in nodes:
+        try:
+            status = await check_firewall_status(spec)
+            if status['ok']:
+                log.info("firewall OK node=%s backend=%s", spec.name, status['backend'])
+                firewall_results.append((spec.name, True, None))
+            else:
+                log.warning("firewall NOT OK node=%s, attempting auto-fix...", spec.name)
+                try:
+                    await ensure_rule(spec, force=True)
+                    # Re-check after fix
+                    status2 = await check_firewall_status(spec)
+                    if status2['ok']:
+                        log.info("firewall FIXED node=%s", spec.name)
+                        firewall_results.append((spec.name, True, "auto-fixed"))
+                    else:
+                        log.error("firewall FIX FAILED node=%s", spec.name)
+                        firewall_results.append((spec.name, False, "fix failed"))
+                except Exception as e:
+                    log.error("firewall fix error node=%s err=%s", spec.name, e)
+                    firewall_results.append((spec.name, False, str(e)))
+        except Exception as e:
+            log.error("firewall check error node=%s err=%s", spec.name, e)
+            firewall_results.append((spec.name, False, str(e)))
+
+    # Send firewall status summary to Telegram
+    if notifier:
+        ok_count = sum(1 for _, ok, _ in firewall_results if ok)
+        fail_count = len(firewall_results) - ok_count
+        if fail_count > 0:
+            lines = ["⚠️ *وضعیت فایروال:*"]
+            for name, ok, note in firewall_results:
+                status_icon = "✅" if ok else "❌"
+                line = f"{status_icon} {name}"
+                if note:
+                    line += f" ({note})"
+                lines.append(line)
+            try:
+                await notifier.send("\n".join(lines))
+            except Exception:
+                pass
+        else:
+            log.info("All %d nodes have firewall OK", ok_count)
 
     watchers=[]
     for spec in nodes:
