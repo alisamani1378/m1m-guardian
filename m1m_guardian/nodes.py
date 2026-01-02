@@ -59,7 +59,6 @@ async def _remove_known_host(host:str):
         if host and os.path.isfile(known):
             try:
                 lines=[]
-                import re
                 pattern=re.compile(rf"(^|,){re.escape(host)}(,|\s)")
                 with open(known,'r',encoding='utf-8',errors='ignore') as f: # type: ignore
                     for line in f:

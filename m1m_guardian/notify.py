@@ -176,9 +176,9 @@ class TelegramBotPoller:
                     data.pop('parse_mode', None)
                     await asyncio.to_thread(self._api_post,'sendMessage', data)
                 else:
-                    logging.getLogger('guardian.notify').debug("telegram send fail final: %s", e)
+                    log.debug("telegram send fail final: %s", e)
             except Exception:
-                logging.getLogger('guardian.notify').debug("telegram send retry failed: %s", e)
+                log.debug("telegram send retry failed: %s", e)
 
     def _kb(self, rows:list[list[tuple[str,str]]]):
         return {"inline_keyboard": [[{"text":t,"callback_data":d} for (t,d) in row] for row in rows]}
@@ -359,7 +359,7 @@ class TelegramBotPoller:
                 await self._send("وضعیت ناشناخته پاک شد.", chat_id=chat_id)
                 self.state.pop(chat_id,None)
         except Exception as e:
-            logging.getLogger('guardian.notify').debug("state input error: %s", e)
+            log.debug("state input error: %s", e)
             self.state.pop(chat_id,None)
             # show short error to user (avoid leaking long traces)
             await self._send(f"خطا در پردازش ورودی: {type(e).__name__}", chat_id=chat_id)
@@ -549,6 +549,15 @@ class TelegramBotPoller:
     def _find_node(self,cfg,name):
         return next((n for n in cfg.get('nodes',[]) if n.get('name')==name), None)
 
+    def _make_spec(self, node_cfg: dict) -> NodeSpec:
+        """Create NodeSpec from config dict."""
+        return NodeSpec(
+            node_cfg.get('name'), node_cfg.get('host'),
+            node_cfg.get('ssh_user', 'root'), node_cfg.get('ssh_port', 22),
+            node_cfg.get('docker_container', 'marzban-node'),
+            node_cfg.get('ssh_key'), node_cfg.get('ssh_pass')
+        )
+
     async def _menu_nodes(self, chat_id:str):
         cfg=self.load(self.cfg_path)
         nodes=cfg.get('nodes',[])
@@ -660,8 +669,8 @@ class TelegramBotPoller:
             if not node:
                 await self._send(f"❌ نود {node_name}: پس از ریست در پیکربندی یافت نشد.", chat_id=chat_id); return
             # Basic SSH
-            from .nodes import NodeSpec as _NS, _ssh_run_capture as _cap, _ssh_base as _base  # type: ignore
-            spec=_NS(node.get('name'), node.get('host'), node.get('ssh_user'), node.get('ssh_port'), node.get('docker_container'), node.get('ssh_key'), node.get('ssh_pass'))
+            from .nodes import _ssh_run_capture as _cap, _ssh_base as _base
+            spec = self._make_spec(node)
             sentinel='__M1M_OK__'
             rc,out=await _cap(_base(spec)+[f'echo {sentinel}'], timeout=10)
             if rc!=0 or sentinel.encode() not in out:
@@ -746,7 +755,7 @@ class TelegramBotPoller:
         await self._send(f"ارسال فرمان ریبوت به {name}...", chat_id=chat_id)
         async def _do():
             try:
-                spec=NodeSpec(node.get('name'), node.get('host'), node.get('ssh_user'), node.get('ssh_port'), node.get('docker_container'), node.get('ssh_key'), node.get('ssh_pass'))
+                spec = self._make_spec(node)
                 # Use a broad command list; SSH will likely drop connection, so rc may be non-zero.
                 cmd="sudo -n reboot || sudo -n /sbin/reboot || sudo -n systemctl reboot || sudo -n shutdown -r now || reboot || /sbin/reboot || systemctl reboot || shutdown -r now"
                 rc=await run_ssh(spec, cmd)
@@ -770,8 +779,8 @@ class TelegramBotPoller:
         
         async def _do():
             try:
-                spec=NodeSpec(node.get('name'), node.get('host'), node.get('ssh_user'), node.get('ssh_port'), node.get('docker_container'), node.get('ssh_key'), node.get('ssh_pass'))
-                
+                spec = self._make_spec(node)
+
                 # Run fix script directly and capture output
                 from .nodes import _ssh_base
                 
@@ -903,12 +912,7 @@ fi
         failed_nodes = []
 
         for node_cfg in nodes_cfg:
-            spec = NodeSpec(
-                node_cfg.get('name'), node_cfg.get('host'),
-                node_cfg.get('ssh_user'), node_cfg.get('ssh_port'),
-                node_cfg.get('docker_container'),
-                node_cfg.get('ssh_key'), node_cfg.get('ssh_pass')
-            )
+            spec = self._make_spec(node_cfg)
             try:
                 status = await check_firewall_status(spec)
                 name = node_cfg.get('name')
@@ -949,14 +953,7 @@ fi
 
         await self._send("🔧 در حال فیکس فایروال همه نودها...", chat_id=chat_id)
 
-        specs = []
-        for node_cfg in nodes_cfg:
-            specs.append(NodeSpec(
-                node_cfg.get('name'), node_cfg.get('host'),
-                node_cfg.get('ssh_user'), node_cfg.get('ssh_port'),
-                node_cfg.get('docker_container'),
-                node_cfg.get('ssh_key'), node_cfg.get('ssh_pass')
-            ))
+        specs = [self._make_spec(node_cfg) for node_cfg in nodes_cfg]
 
         try:
             results = await force_ensure_all_nodes(specs)

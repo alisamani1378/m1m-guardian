@@ -1,58 +1,78 @@
 # m1m-guardian
 
-Xray multi-IP guardian: monitors Xray node logs (inside a docker container) and bans IPs that exceed configured per-inbound concurrent IP limits. Optionally performs cross-node bans.
+Xray multi-IP guardian: monitors Xray node logs (inside a docker container) and bans IPs that exceed configured per-inbound concurrent IP limits.
 
 ## Features
-- Tracks active IPs per (inbound, user email)
-- Enforces configurable concurrent IP limits (per inbound + global fallback)
-- Bans evicted (old) IPs for configurable minutes using ipset + iptables
-- Optional cross-node ban propagation
-- Interactive TUI-style config menu (nodes + limits)
-- Supports SSH auth: key path, pasted private key (auto-saved 0600), or password
-- Simple YAML config stored at `/etc/m1m-guardian/config.yaml`
-- Redis for state
+- 📊 Tracks active IPs per (inbound, user email)
+- 🚫 Enforces configurable concurrent IP limits per inbound
+- 🔥 Bans IPs using ipset + iptables (supports Docker and non-Docker setups)
+- 🤖 Telegram bot for management (nodes, inbounds, bans, firewall)
+- ♻️ Auto-reconnect and node health monitoring
+- 🔄 Cross-node ban propagation (ban IP on all nodes)
+- 📱 Ban notification batching (reduces Telegram spam)
+- 🛡️ Auto-fix SSH host key changes
+- 💾 Redis for state persistence
+
+## Telegram Bot Features
+- View/manage nodes, inbounds, sessions, and banned IPs
+- 🔥 Check firewall status on all nodes
+- 🔧 Fix firewall rules remotely
+- ♻️ Restart service or reboot nodes
+- 🆕 One-click update from git
+
+## Install (auto)
+```bash
+curl -fsSL https://raw.githubusercontent.com/yourrepo/m1m-guardian/main/auto.sh | bash
+```
 
 ## Install (manual)
 ```bash
+git clone https://github.com/yourrepo/m1m-guardian.git /opt/m1m-guardian
+cd /opt/m1m-guardian
 python -m venv .venv
 . .venv/bin/activate
-pip install --upgrade pip
 pip install -e .
+cp config.example.yaml /etc/m1m-guardian/config.yaml
+# Edit config.yaml with your settings
+systemctl enable --now m1m-guardian
 ```
 
 ## CLI Entrypoints
-- `m1m-guardian --config /etc/m1m-guardian/config.yaml` : Run guardian watchers (systemd uses module form `python -m m1m_guardian.agent`).
-- `m1m-guardian-config --menu /etc/m1m-guardian/config.yaml` : Interactive menu (manage nodes & limits, fallback limit).
+- `m1m-guardian --config /etc/m1m-guardian/config.yaml` : Run guardian
+- `m1m-guardian-config --menu /etc/m1m-guardian/config.yaml` : Interactive config menu
 - `m1m-guardian-config --show /etc/m1m-guardian/config.yaml` : Show config
-- `m1m-guardian-config --add-node /etc/m1m-guardian/config.yaml` : Add node (non-interactive)
-- `m1m-guardian-config --remove-node /etc/m1m-guardian/config.yaml` : Remove node
-- `m1m-guardian-config --edit-limits /etc/m1m-guardian/config.yaml` : Legacy limits editor (still works)
 
-## Systemd
-`auto.sh` will:
-1. Install OS deps (apt/yum)
-2. Clone/update repo into `/opt/m1m-guardian`
-3. Create venv & install requirements + editable package
-4. Install systemd unit `m1m-guardian.service`
-5. Show current config.
+## Configuration (`/etc/m1m-guardian/config.yaml`)
+```yaml
+redis:
+  url: redis://127.0.0.1:6379/0
 
-After install you can re-run `auto.sh` and choose option 2 to open the interactive config menu.
+ban_minutes: 10
 
-## Configuration
-See `config.example.yaml` for defaults. Keys:
-- `redis.url`: Redis connection URL
-- `ban_minutes`: Ban duration (minutes)
-- `cross_node_ban`: true/false for propagating bans
-- `ports`: List of service ports whose conntrack entries are purged on ban
-- `fallback_limit`: Global default max concurrent IPs when an inbound has no explicit entry
-- `inbounds_limit`: (Optional) Map of inbound -> limit (can be empty)
-- `nodes`: List of node objects:
-  - `name`, `host`, `ssh_user`, `ssh_port`, `docker_container`
-  - One of: `ssh_key` (path) OR `ssh_pass`
-  - Pasted keys are stored under `/etc/m1m-guardian/keys/<node>.key` with chmod 600
+telegram:
+  bot_token: "YOUR_BOT_TOKEN"
+  chat_id: "YOUR_CHAT_ID"
+  admins: []  # Additional admin chat IDs
 
-## SSH Key Paste Mode
-When adding/editing a node choose option 2 (Paste key). Paste until the line containing `END PRIVATE KEY` (auto-stop). Key is saved securely.
+inbounds_limit:
+  VIP: 2
+  Free: 1
+
+nodes:
+  - name: node1
+    host: 1.2.3.4
+    ssh_user: root
+    ssh_port: 22
+    docker_container: marzban-node
+    ssh_key: /root/.ssh/id_rsa  # or ssh_pass: "password"
+```
+
+## Firewall Setup
+The guardian automatically creates:
+- ipset sets: `m1m_guardian` (IPv4), `m1m_guardian6` (IPv6)
+- iptables rules in `INPUT`, `FORWARD`, and `DOCKER-USER` (if Docker exists)
+
+Use the Telegram bot's "🔥 چک فایروال" to verify and fix firewall rules.
 
 ## License
 MIT

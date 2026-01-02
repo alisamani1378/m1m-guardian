@@ -1,10 +1,12 @@
-import argparse, asyncio, logging, sys, yaml, os
+import argparse, asyncio, logging, sys, os
 from .config import load, ensure_defaults, save
 from .store import Store
 from .nodes import NodeSpec
 from .watcher import NodeWatcher
 from .notify import TelegramNotifier, TelegramBotPoller
 from .log_forward import install_telegram_log_forward
+
+log = logging.getLogger("guardian.main")
 
 def setup_logging(level:str="INFO"):
     h = logging.StreamHandler(sys.stdout)
@@ -29,11 +31,19 @@ def make_nodes(cfg):
 async def amain(config_path:str, log_level:str):
     setup_logging(log_level)
     cfg = load(config_path); ensure_defaults(cfg)
-    logging.getLogger("guardian.start").info(
+    log.info(
         "config loaded: nodes=%d ban_minutes=%s",
         len(cfg.get("nodes",[])), cfg.get("ban_minutes")
     )
     store = Store(cfg["redis"]["url"])
+
+    # Test Redis connection at startup
+    try:
+        await store.ping()
+        log.info("redis connection: OK")
+    except Exception as e:
+        log.error("redis connection FAILED: %s - banning will not work!", e)
+
     nodes = make_nodes(cfg)
     limits = cfg.get("inbounds_limit", {})
     ban_minutes = int(cfg.get("ban_minutes",10))
@@ -59,15 +69,15 @@ async def amain(config_path:str, log_level:str):
         install_telegram_log_forward(notifier, min_interval=20.0)
 
     if not nodes:
-        logging.error("No nodes configured. Use auto.sh -> option 2 (Config menu) to add a node.")
+        log.error("No nodes configured. Use auto.sh -> option 2 (Config menu) to add a node.")
         return
 
     watchers=[]
     for spec in nodes:
-        logging.getLogger("guardian.start").debug("starting watcher for node=%s host=%s", spec.name, spec.host)
+        log.debug("starting watcher for node=%s host=%s", spec.name, spec.host)
         watchers.append(NodeWatcher(spec, store, limits, ban_minutes, nodes, notifier).run())
 
-    logging.info("Starting %d node watchers...", len(watchers))
+    log.info("Starting %d node watchers...", len(watchers))
     await asyncio.gather(*watchers, *( [poller_task] if poller_task else [] ))
 
 def main():

@@ -1,9 +1,13 @@
-import time, asyncio
+import time
 import redis.asyncio as redis
 
 class Store:
     def __init__(self, url:str):
         self.r = redis.from_url(url, decode_responses=True)
+
+    async def ping(self) -> bool:
+        """Test Redis connection. Raises exception if fails."""
+        return await self.r.ping()
 
     async def add_ip(self, inbound:str, email:str, ip:str, limit:int):
         """
