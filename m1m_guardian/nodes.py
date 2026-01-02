@@ -8,6 +8,8 @@ import re
 log = logging.getLogger("guardian.nodes")
 # Track hosts whose host key mismatch we already auto-cleared (avoid loops)
 _hostkey_cleared:set[str] = set()
+# Semaphore to limit concurrent SSH operations (prevent resource exhaustion)
+_ssh_semaphore = asyncio.Semaphore(10)
 
 class NodeSpec:
     def __init__(self, name, host, ssh_user, ssh_port, docker_container, ssh_key=None, ssh_pass=None):
@@ -37,16 +39,17 @@ def _ssh_base(spec:NodeSpec)->List[str]:
     return common
 
 async def _ssh_run_capture(cmd:list[str], timeout:float=15.0):
-    try:
-        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-    except Exception as e:
-        return 997, f"spawn_error: {e}".encode()
-    try:
-        out,_= await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        with contextlib.suppress(Exception): proc.kill()
-        return 998, b'timeout'
-    return proc.returncode, out or b''
+    async with _ssh_semaphore:
+        try:
+            proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        except Exception as e:
+            return 997, f"spawn_error: {e}".encode()
+        try:
+            out,_= await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            with contextlib.suppress(Exception): proc.kill()
+            return 998, b'timeout'
+        return proc.returncode, out or b''
 
 async def _remove_known_host(host:str):
     """Remove host key entry so new key is accepted. Returns True if removal ran."""
@@ -74,9 +77,14 @@ async def _remove_known_host(host:str):
         return False
 
 async def run_ssh(spec:NodeSpec, remote_cmd:str) -> int:
-    cmd = _ssh_base(spec) + [remote_cmd]
-    proc = await asyncio.create_subprocess_exec(*cmd)
-    return await proc.wait()
+    async with _ssh_semaphore:
+        cmd = _ssh_base(spec) + [remote_cmd]
+        try:
+            proc = await asyncio.create_subprocess_exec(*cmd)
+            return await asyncio.wait_for(proc.wait(), timeout=30.0)
+        except asyncio.TimeoutError:
+            with contextlib.suppress(Exception): proc.kill()
+            return 999
 
 async def _diagnose_connectivity(spec:NodeSpec)->bool:
     """Return True if basic SSH works; logs detailed error otherwise.

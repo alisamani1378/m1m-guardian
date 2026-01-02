@@ -39,7 +39,12 @@ class TelegramNotifier:
         pm = self._prepare(text, parse_mode)
         payload={ 'chat_id': self.chat_id, 'text': text[:4000], 'disable_web_page_preview':'true'}
         if pm: payload['parse_mode']=pm
-        await asyncio.to_thread(self._post, payload)
+        try:
+            await asyncio.wait_for(asyncio.to_thread(self._post, payload), timeout=20.0)
+        except asyncio.TimeoutError:
+            log.warning("telegram send timeout")
+        except Exception as e:
+            log.warning("telegram send error: %s", e)
 
     async def send_with_inline(self, text:str, buttons:list[list[tuple[str,str]]], parse_mode:str|None='Markdown'):
         """buttons: list of rows; each row list of (label, callback_data)."""
@@ -48,7 +53,12 @@ class TelegramNotifier:
         markup={"inline_keyboard": [[{"text": b[0], "callback_data": b[1]} for b in row] for row in buttons]}
         payload={ 'chat_id': self.chat_id, 'text': text[:4000], 'reply_markup': json.dumps(markup), 'disable_web_page_preview':'true'}
         if pm: payload['parse_mode']=pm
-        await asyncio.to_thread(self._post, payload)
+        try:
+            await asyncio.wait_for(asyncio.to_thread(self._post, payload), timeout=20.0)
+        except asyncio.TimeoutError:
+            log.warning("telegram send_with_inline timeout")
+        except Exception as e:
+            log.warning("telegram send_with_inline error: %s", e)
 
     def _post(self, fields:dict):
         if not self.enabled: return

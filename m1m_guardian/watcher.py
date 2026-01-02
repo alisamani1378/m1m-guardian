@@ -285,20 +285,31 @@ class NodeWatcher:
                     for old_ip in evicted:
                         if old_ip == ip: continue
                         if await self.store.is_banned_recently(old_ip): continue
-                        success_nodes=[]; failed_nodes=[]
-                        for node in self.all_nodes:
+
+                        # بن کردن همزمان روی همه نودها برای سرعت بیشتر
+                        async def ban_on_node(node):
                             try:
-                                # DISABLED: auto ensure_rule - now manual via Telegram bot button
-                                # await ensure_rule(node)
                                 ok = await schedule_ban(node, old_ip, self.ban_minutes*60)
-                                if ok:
-                                    success_nodes.append(node.name)
-                                else:
-                                    failed_nodes.append(node.name)
-                                    log.warning("ban FAILED (schedule_ban returned False) node=%s ip=%s - check firewall rules are installed", node.name, old_ip)
+                                return (node.name, ok, None)
                             except Exception as e:
-                                failed_nodes.append(node.name)
-                                log.warning("ban exception node=%s ip=%s err=%s", node.name, old_ip, e)
+                                return (node.name, False, str(e))
+
+                        results = await asyncio.gather(*[ban_on_node(n) for n in self.all_nodes], return_exceptions=True)
+
+                        success_nodes=[]; failed_nodes=[]
+                        for res in results:
+                            if isinstance(res, Exception):
+                                continue
+                            name, ok, err = res
+                            if ok:
+                                success_nodes.append(name)
+                            else:
+                                failed_nodes.append(name)
+                                if err:
+                                    log.warning("ban exception node=%s ip=%s err=%s", name, old_ip, err)
+                                else:
+                                    log.warning("ban FAILED (schedule_ban returned False) node=%s ip=%s - check firewall rules are installed", name, old_ip)
+
                         log.warning("banned ip=%s user=%s inbound=%s nodes=%s%s for %dm", old_ip, email, inbound, ','.join(success_nodes) or '-', (f" failed={','.join(failed_nodes)}" if failed_nodes else ''), self.ban_minutes)
                         await self.store.mark_banned(old_ip, self.ban_minutes*60)
                         # NEW: send via batcher instead of per-ban message

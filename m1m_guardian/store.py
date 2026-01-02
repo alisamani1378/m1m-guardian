@@ -1,42 +1,92 @@
 import time
+import asyncio
 import redis.asyncio as redis
+import logging
+
+log = logging.getLogger("guardian.store")
 
 class Store:
     def __init__(self, url:str):
-        self.r = redis.from_url(url, decode_responses=True)
+        # استفاده از connection pool با تنظیمات بهینه
+        self.r = redis.from_url(
+            url,
+            decode_responses=True,
+            socket_timeout=5.0,           # timeout برای هر operation
+            socket_connect_timeout=5.0,   # timeout برای اتصال
+            retry_on_timeout=True,        # تلاش مجدد در timeout
+            health_check_interval=30,     # health check هر 30 ثانیه
+            max_connections=20,           # حداکثر اتصالات همزمان
+        )
+        self._last_error_log = 0.0
+
+    async def _safe_execute(self, coro, default=None):
+        """Execute Redis operation with timeout and error handling."""
+        try:
+            return await asyncio.wait_for(coro, timeout=10.0)
+        except asyncio.TimeoutError:
+            now = time.time()
+            if now - self._last_error_log > 60:  # log هر 60 ثانیه
+                log.error("Redis operation timeout")
+                self._last_error_log = now
+            return default
+        except redis.ConnectionError as e:
+            now = time.time()
+            if now - self._last_error_log > 60:
+                log.error("Redis connection error: %s", e)
+                self._last_error_log = now
+            return default
+        except Exception as e:
+            now = time.time()
+            if now - self._last_error_log > 60:
+                log.error("Redis error: %s", e)
+                self._last_error_log = now
+            return default
 
     async def ping(self) -> bool:
         """Test Redis connection. Raises exception if fails."""
-        return await self.r.ping()
+        return await asyncio.wait_for(self.r.ping(), timeout=5.0)
 
     async def add_ip(self, inbound:str, email:str, ip:str, limit:int):
         """
         برمی‌گرداند: (evicted_ips:list[str], already_present:bool)
         """
-        key=f"a:{inbound}:{email}"
-        now=time.time()
-        pipe=self.r.pipeline()
-        # امتیاز=زمان برای ZSET
-        pipe.zadd(key, {ip: now})
-        pipe.zcard(key)
-        pipe.expire(key, 3600*6)  # نگهداری ۶ ساعت (قابل تغییر)
-        res=await pipe.execute()
-        count=int(res[1])
-        evicted=[]
-        if count>limit:
-            # قدیمی‌ها را حذف کن تا به limit برسیم
-            k = count - limit
-            old=await self.r.zrange(key, 0, k-1)
-            if old:
-                await self.r.zrem(key, *old)
-                evicted=old
-        return evicted, (count>0 and not evicted and await self.r.zscore(key, ip) is not None)
+        try:
+            key=f"a:{inbound}:{email}"
+            now_ts=time.time()
+            pipe=self.r.pipeline()
+            # امتیاز=زمان برای ZSET
+            pipe.zadd(key, {ip: now_ts})
+            pipe.zcard(key)
+            pipe.expire(key, 3600*6)  # نگهداری ۶ ساعت (قابل تغییر)
+            res=await asyncio.wait_for(pipe.execute(), timeout=5.0)
+            count=int(res[1])
+            evicted=[]
+            if count>limit:
+                # قدیمی‌ها را حذف کن تا به limit برسیم
+                k = count - limit
+                old=await asyncio.wait_for(self.r.zrange(key, 0, k-1), timeout=3.0)
+                if old:
+                    await asyncio.wait_for(self.r.zrem(key, *old), timeout=3.0)
+                    evicted=old
+            return evicted, (count>0 and not evicted and await asyncio.wait_for(self.r.zscore(key, ip), timeout=3.0) is not None)
+        except asyncio.TimeoutError:
+            log.warning("add_ip timeout for %s:%s", inbound, email)
+            return [], False
+        except Exception as e:
+            log.warning("add_ip error: %s", e)
+            return [], False
 
     async def mark_banned(self, ip:str, seconds:int):
-        await self.r.setex(f"banned:{ip}", seconds, "1")
+        try:
+            await asyncio.wait_for(self.r.setex(f"banned:{ip}", seconds, "1"), timeout=3.0)
+        except Exception as e:
+            log.warning("mark_banned error ip=%s: %s", ip, e)
 
     async def is_banned_recently(self, ip:str)->bool:
-        return await self.r.exists(f"banned:{ip}") == 1
+        try:
+            return await asyncio.wait_for(self.r.exists(f"banned:{ip}"), timeout=3.0) == 1
+        except Exception:
+            return False
 
     async def list_active(self, limit:int=200):
         """Return up to limit entries of (inbound,email,ips:list)."""
