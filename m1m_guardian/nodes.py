@@ -155,15 +155,8 @@ async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
             "fi\n"
             "if ! $SUDO docker inspect \"$TARGET\" >/dev/null 2>&1; then echo '[guardian-stream] no_container'; exit 42; fi\n"
             "echo '[guardian-stream] attach container='$TARGET\n"
-            "exec $SUDO docker exec -i \"$TARGET\" sh -c '"
-            "if ! command -v pgrep >/dev/null 2>&1; then (apk add --no-cache procps 2>/dev/null || (apt-get update -y >/dev/null 2>&1 && apt-get install -y procps >/dev/null 2>&1) || yum install -y procps-ng >/dev/null 2>&1 || true); fi; "
-            "while true; do "
-            "if command -v pgrep >/dev/null 2>&1; then pid=$(pgrep -xo xray); else pid=$(ps | grep -i \\bxray\\b | grep -v grep | awk \"{print $1; exit}\"); fi; "
-            "if [ -z \"$pid\" ]; then echo \"[guardian-stream] no_xray_process\"; sleep 2; continue; fi; "
-            "if [ ! -r /proc/$pid/fd/1 ]; then echo \"[guardian-stream] fd_unreadable pid=$pid\"; sleep 2; continue; fi; "
-            "echo \"[guardian-stream] follow pid=$pid\"; "
-            "cat /proc/$pid/fd/1 /proc/$pid/fd/2 2>/dev/null || true; "
-            "sleep 1; done'"
+            "echo '[guardian-stream] follow pid=docker-logs'\n"
+            "exec $SUDO docker logs -f --tail 10 \"$TARGET\" 2>&1"
         )
         cmd = _ssh_base(spec) + ["sh","-lc", remote_script]
         log.debug("starting direct stream (no-fallback) node=%s cmd=%s", spec.name, ' '.join(cmd))
@@ -228,4 +221,4 @@ async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
             else:
                 failure_streak=0
             # Do not yield inside finally to avoid GeneratorExit issues.
-            await asyncio.sleep(4)
+            await asyncio.sleep(6)

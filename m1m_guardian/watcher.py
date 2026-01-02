@@ -36,6 +36,10 @@ class NodeWatcher:
         # known_hosts auto-fix state
         self._last_known_hosts_fix: float = 0.0
         self._known_hosts_fix_cooldown: float = 300.0  # seconds
+        # rate limiting to prevent CPU spike from high log volume
+        self._rate_limit_count: int = 0
+        self._rate_limit_window_start: float = time.time()
+        self._rate_limit_max_per_sec: int = 500  # max lines processed per second
 
     async def _notify(self, text:str):
         if self.notifier:
@@ -215,6 +219,17 @@ class NodeWatcher:
         while True:
             try:
                 async for line in stream_logs(self.spec):
+                    # rate limiting to prevent CPU spike
+                    now = time.time()
+                    if now - self._rate_limit_window_start >= 1.0:
+                        self._rate_limit_window_start = now
+                        self._rate_limit_count = 0
+                    self._rate_limit_count += 1
+                    if self._rate_limit_count > self._rate_limit_max_per_sec:
+                        if self._rate_limit_count == self._rate_limit_max_per_sec + 1:
+                            log.warning("rate limit hit node=%s, throttling", self.spec.name)
+                        await asyncio.sleep(0.01)  # brief yield to prevent CPU saturation
+
                     # lightweight periodic stats (every 60s)
                     self._lines+=1
                     now=time.time()
