@@ -47,7 +47,7 @@ async def ensure_rule(spec: NodeSpec, force: bool = False):
     if not force and key in _RULE_ENSURED:
         return
 
-    inner = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
+    inner = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo -n"; fi; fi
 
 # Optionally bump nf_conntrack_max if too low (best-effort)
 if [ -r /proc/sys/net/netfilter/nf_conntrack_max ]; then
@@ -165,7 +165,7 @@ true'''.strip()
     out, _ = await p.communicate()
     
     # Now verify that rules were actually added
-    verify_script = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
+    verify_script = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo -n"; fi; fi
 BACKEND=$({_remote_detect_backend()})
 RULES_OK=0
 
@@ -188,14 +188,14 @@ case "$BACKEND" in
       exit 1
     fi
     
-    # Check if rules exist in DOCKER-USER or INPUT/FORWARD
-    if $IPT -S DOCKER-USER 2>/dev/null | grep -q "{SET_V4}"; then
+    # Check if rules exist in DOCKER-USER or INPUT/FORWARD (need sudo for iptables-nft)
+    if $SUDO $IPT -S DOCKER-USER 2>/dev/null | grep -q "{SET_V4}"; then
       RULES_OK=1
       echo "VERIFY_OK: rules in DOCKER-USER"
-    elif $IPT -S INPUT 2>/dev/null | grep -q "{SET_V4}"; then
+    elif $SUDO $IPT -S INPUT 2>/dev/null | grep -q "{SET_V4}"; then
       RULES_OK=1
       echo "VERIFY_OK: rules in INPUT"
-    elif $IPT -S FORWARD 2>/dev/null | grep -q "{SET_V4}"; then
+    elif $SUDO $IPT -S FORWARD 2>/dev/null | grep -q "{SET_V4}"; then
       RULES_OK=1
       echo "VERIFY_OK: rules in FORWARD"
     fi
@@ -203,7 +203,7 @@ case "$BACKEND" in
     if [ "$RULES_OK" -eq 0 ]; then
       echo "VERIFY_FAIL: no iptables rules found for {SET_V4}"
       # Try to add rules now
-      if $IPT -S DOCKER-USER >/dev/null 2>&1; then
+      if $SUDO $IPT -S DOCKER-USER >/dev/null 2>&1; then
         echo "VERIFY_FIX: adding rules to DOCKER-USER"
         $SUDO $IPT -I DOCKER-USER 1 -m set --match-set {SET_V4} src -j DROP 2>&1 || true
       else
@@ -213,12 +213,12 @@ case "$BACKEND" in
       fi
       sleep 1
       # Verify again
-      if $IPT -S DOCKER-USER 2>/dev/null | grep -q "{SET_V4}" || $IPT -S INPUT 2>/dev/null | grep -q "{SET_V4}" || $IPT -S FORWARD 2>/dev/null | grep -q "{SET_V4}"; then
+      if $SUDO $IPT -S DOCKER-USER 2>/dev/null | grep -q "{SET_V4}" || $SUDO $IPT -S INPUT 2>/dev/null | grep -q "{SET_V4}" || $SUDO $IPT -S FORWARD 2>/dev/null | grep -q "{SET_V4}"; then
         echo "VERIFY_FIXED: rules added successfully"
       else
         echo "VERIFY_FAIL: could not add rules"
-        echo "DEBUG: iptables=$IPT"
-        $IPT -S INPUT 2>&1 | head -5 || true
+        echo "DEBUG: iptables=$IPT SUDO=$SUDO"
+        $SUDO $IPT -S INPUT 2>&1 | head -5 || true
         $SUDO ipset list {SET_V4} 2>&1 | head -5 || true
         exit 1
       fi
@@ -261,7 +261,7 @@ async def check_firewall_status(spec: NodeSpec) -> dict:
     Check firewall status on a node and return diagnostic info.
     Returns dict with keys: ok, backend, sets_exist, rules_exist, details
     """
-    check_script = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
+    check_script = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo -n"; fi; fi
 BACKEND=$({_remote_detect_backend()})
 echo "BACKEND=$BACKEND"
 
@@ -435,7 +435,7 @@ async def ban_ip(spec: NodeSpec, ip: str, seconds: int) -> bool:
     is_v6 = _is_ipv6(ip)
     conntrack_block = _cmd_flush_all(ip)
 
-    add_cmd = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
+    add_cmd = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo -n"; fi; fi
 BACKEND=$({_remote_detect_backend()})
 
 case "$BACKEND" in
@@ -506,7 +506,7 @@ async def is_banned(spec: NodeSpec, ip: str) -> bool:
     except ValueError:
         return False
     set_name = SET_V6 if _is_ipv6(ip) else SET_V4
-    test_cmd = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
+    test_cmd = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo -n"; fi; fi
 BACKEND=$({_remote_detect_backend()})
 case "$BACKEND" in
   "IPTABLES")
@@ -532,7 +532,7 @@ async def unban_ip(spec: NodeSpec, ip: str) -> bool:
     except ValueError:
         return False
     set_name = SET_V6 if _is_ipv6(ip) else SET_V4
-    del_cmd = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
+    del_cmd = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo -n"; fi; fi
 BACKEND=$({_remote_detect_backend()})
 case "$BACKEND" in
   "IPTABLES")
@@ -692,7 +692,7 @@ async def _apply_batch(spec: NodeSpec, items: list[_BanItem], st: _WorkerState):
         conntrack_cmds.append(f"conntrack -D -s {q} >/dev/null 2>&1 || true; conntrack -D -d {q} >/dev/null 2>&1 || true")
     conntrack_block = ("if command -v conntrack >/dev/null 2>&1; then " + " ".join(conntrack_cmds) + "; fi") if conntrack_cmds else "true"
 
-    remote = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
+    remote = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo -n"; fi; fi
 BACKEND=$({_remote_detect_backend()})
 true
 case "$BACKEND" in

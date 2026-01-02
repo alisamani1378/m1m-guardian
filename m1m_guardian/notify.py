@@ -813,7 +813,7 @@ class TelegramBotPoller:
                 # Run fix script directly and capture output
                 from .nodes import _ssh_base
                 
-                fix_script = '''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
+                fix_script = '''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo -n"; fi; fi
 echo "=== Checking backend ==="
 BACKEND=""
 IPT=$(command -v iptables-nft || command -v iptables || command -v iptables-legacy || true)
