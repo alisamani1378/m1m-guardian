@@ -280,14 +280,30 @@ case "$BACKEND" in
     IPT=$(command -v iptables-nft || command -v iptables || command -v iptables-legacy || true)
     if [ -n "$IPT" ]; then
       echo "IPTABLES_CMD=$IPT"
-      if $IPT -S DOCKER-USER 2>/dev/null | grep -q "{SET_V4}"; then
-        echo "RULES_DOCKER_USER=yes"
-      elif $IPT -S INPUT 2>/dev/null | grep -q "{SET_V4}"; then
+      # Check all chains separately
+      HAS_DOCKER=0
+      if $SUDO $IPT -S DOCKER-USER >/dev/null 2>&1; then
+        HAS_DOCKER=1
+        echo "HAS_DOCKER_USER=yes"
+        if $SUDO $IPT -S DOCKER-USER 2>/dev/null | grep -q "{SET_V4}"; then
+          echo "RULES_DOCKER_USER=yes"
+        else
+          echo "RULES_DOCKER_USER=no"
+        fi
+      else
+        echo "HAS_DOCKER_USER=no"
+      fi
+      
+      if $SUDO $IPT -S INPUT 2>/dev/null | grep -q "{SET_V4}"; then
         echo "RULES_INPUT=yes"
-      elif $IPT -S FORWARD 2>/dev/null | grep -q "{SET_V4}"; then
+      else
+        echo "RULES_INPUT=no"
+      fi
+      
+      if $SUDO $IPT -S FORWARD 2>/dev/null | grep -q "{SET_V4}"; then
         echo "RULES_FORWARD=yes"
       else
-        echo "RULES_EXIST=no"
+        echo "RULES_FORWARD=no"
       fi
     else
       echo "IPTABLES_CMD=none"
@@ -328,6 +344,10 @@ esac
             "backend": "unknown",
             "sets_exist": False,
             "rules_exist": False,
+            "rules_input": False,
+            "rules_forward": False,
+            "rules_docker": False,
+            "has_docker": False,
             "details": text.strip(),
             "cached_ensured": f"{spec.host}:{spec.ssh_port}" in _RULE_ENSURED
         }
@@ -335,7 +355,19 @@ esac
         if "BACKEND=IPTABLES" in text:
             result["backend"] = "iptables"
             result["sets_exist"] = "SET_V4_EXISTS=yes" in text
-            result["rules_exist"] = any(x in text for x in ["RULES_DOCKER_USER=yes", "RULES_INPUT=yes", "RULES_FORWARD=yes"])
+            result["has_docker"] = "HAS_DOCKER_USER=yes" in text
+            result["rules_input"] = "RULES_INPUT=yes" in text
+            result["rules_forward"] = "RULES_FORWARD=yes" in text
+            result["rules_docker"] = "RULES_DOCKER_USER=yes" in text
+
+            # Rules are OK if INPUT is set AND (DOCKER-USER or FORWARD depending on Docker presence)
+            if result["rules_input"]:
+                if result["has_docker"]:
+                    result["rules_exist"] = result["rules_docker"]
+                else:
+                    result["rules_exist"] = result["rules_forward"]
+            else:
+                result["rules_exist"] = False
         elif "BACKEND=NFT" in text:
             result["backend"] = "nftables"
             result["sets_exist"] = "SET_V4_EXISTS=yes" in text
