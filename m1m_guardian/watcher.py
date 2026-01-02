@@ -1,7 +1,7 @@
 import asyncio, logging, time, subprocess
 from .nodes import NodeSpec, stream_logs, run_ssh
 from .parser import parse_line
-from .firewall import ensure_rule, schedule_ban
+from .firewall import schedule_ban
 from .notify import TelegramNotifier
 
 log = logging.getLogger("guardian.watcher")
@@ -276,10 +276,14 @@ class NodeWatcher:
                                 # DISABLED: auto ensure_rule - now manual via Telegram bot button
                                 # await ensure_rule(node)
                                 ok = await schedule_ban(node, old_ip, self.ban_minutes*60)
-                                (success_nodes if ok else failed_nodes).append(node.name)
+                                if ok:
+                                    success_nodes.append(node.name)
+                                else:
+                                    failed_nodes.append(node.name)
+                                    log.warning("ban FAILED (schedule_ban returned False) node=%s ip=%s - check firewall rules are installed", node.name, old_ip)
                             except Exception as e:
                                 failed_nodes.append(node.name)
-                                log.debug("ban exception node=%s ip=%s err=%s", node.name, old_ip, e)
+                                log.warning("ban exception node=%s ip=%s err=%s", node.name, old_ip, e)
                         log.warning("banned ip=%s user=%s inbound=%s nodes=%s%s for %dm", old_ip, email, inbound, ','.join(success_nodes) or '-', (f" failed={','.join(failed_nodes)}" if failed_nodes else ''), self.ban_minutes)
                         await self.store.mark_banned(old_ip, self.ban_minutes*60)
                         # NEW: send via batcher instead of per-ban message

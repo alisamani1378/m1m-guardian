@@ -1,7 +1,7 @@
 import asyncio, json, logging, urllib.request, urllib.parse
 import os, time
 from typing import List, Dict, Tuple
-from .firewall import unban_ip, ensure_rule  # added ensure_rule for fix firewall
+from .firewall import unban_ip, check_firewall_status, force_ensure_all_nodes
 from .nodes import NodeSpec, run_ssh
 from .config import ensure_defaults  # added
 
@@ -191,7 +191,7 @@ class TelegramBotPoller:
             [("📊 وضعیت","mn_status"),("👥 سشن‌ها","mn_sessions")],
             [("🧩 نودها","mn_nodes"),("📡 این‌باندها","mn_inb")],
             [("🚫 IP بن","mn_banned"),("⚙️ تنظیمات","mn_settings")],
-            [("🆕 آپدیت","set_update")],
+            [("🔥 چک فایروال","mn_fwcheck"),("🆕 آپدیت","set_update")],
             [("🔁 ریفرش","mn_refresh"),("♻️ ریست","set_restart")]
         ]
         await self._send(header, self._kb(rows), chat_id=chat_id, parse_mode='Markdown')
@@ -370,6 +370,8 @@ class TelegramBotPoller:
             await self._menu_status(chat_id); return
         if data=='mn_refresh':
             await self._menu_main(chat_id); return
+        if data=='mn_fwcheck':
+            await self._menu_firewall_check(chat_id); return
         if data=='mn_nodes':
             await self._menu_nodes(chat_id); return
         if data=='mn_inb':
@@ -383,6 +385,8 @@ class TelegramBotPoller:
             await self._menu_banned(chat_id, page=0); return
         if data=='set_update':
             await self._update_service(chat_id); return
+        if data=='fixfwall':
+            await self._perform_fix_all_firewall(chat_id); return
         # pagination for banned
         if data.startswith('bannedpage:'):
             try:
@@ -851,4 +855,86 @@ fi
                 await self._send(f"❌ خطا در فیکس فایروال {name}: {e}", chat_id=chat_id)
         
         asyncio.create_task(_do())
+
+    async def _menu_firewall_check(self, chat_id:str):
+        """Check firewall status on all nodes and report."""
+
+        await self._send("🔥 در حال بررسی وضعیت فایروال همه نودها...", chat_id=chat_id)
+
+        cfg = self.load(self.cfg_path)
+        nodes_cfg = cfg.get('nodes', [])
+
+        if not nodes_cfg:
+            await self._send("❌ هیچ نودی تعریف نشده.", self._kb([[('↩️ برگشت','mn_refresh')]]), chat_id=chat_id)
+            return
+
+        results = []
+        failed_nodes = []
+
+        for node_cfg in nodes_cfg:
+            spec = NodeSpec(
+                node_cfg.get('name'), node_cfg.get('host'),
+                node_cfg.get('ssh_user'), node_cfg.get('ssh_port'),
+                node_cfg.get('docker_container'),
+                node_cfg.get('ssh_key'), node_cfg.get('ssh_pass')
+            )
+            try:
+                status = await check_firewall_status(spec)
+                name = node_cfg.get('name')
+
+                if status['ok']:
+                    results.append(f"✅ {name}: OK ({status['backend']})")
+                else:
+                    results.append(f"❌ {name}: FAIL")
+                    results.append(f"   backend={status['backend']} sets={status['sets_exist']} rules={status['rules_exist']}")
+                    failed_nodes.append(name)
+            except Exception as e:
+                results.append(f"❌ {node_cfg.get('name')}: خطا - {str(e)[:50]}")
+                failed_nodes.append(node_cfg.get('name'))
+
+        text = "🔥 *وضعیت فایروال نودها*\n\n" + "\n".join(results)
+
+        rows = []
+        # Add fix button for each failed node
+        for name in failed_nodes:
+            rows.append([(f"🔧 فیکس {name}", f"nodefixfw:{name}")])
+
+        if failed_nodes:
+            rows.append([("🔧 فیکس همه", "fixfwall")])
+
+        rows.append([("🔄 بررسی مجدد", "mn_fwcheck"), ("↩️ برگشت", "mn_refresh")])
+
+        await self._send(text, self._kb(rows), chat_id=chat_id, parse_mode='Markdown')
+
+    async def _perform_fix_all_firewall(self, chat_id:str):
+        """Fix firewall on all nodes."""
+
+        cfg = self.load(self.cfg_path)
+        nodes_cfg = cfg.get('nodes', [])
+
+        if not nodes_cfg:
+            await self._send("❌ هیچ نودی تعریف نشده.", chat_id=chat_id)
+            return
+
+        await self._send("🔧 در حال فیکس فایروال همه نودها...", chat_id=chat_id)
+
+        specs = []
+        for node_cfg in nodes_cfg:
+            specs.append(NodeSpec(
+                node_cfg.get('name'), node_cfg.get('host'),
+                node_cfg.get('ssh_user'), node_cfg.get('ssh_port'),
+                node_cfg.get('docker_container'),
+                node_cfg.get('ssh_key'), node_cfg.get('ssh_pass')
+            ))
+
+        try:
+            results = await force_ensure_all_nodes(specs)
+
+            lines = ["🔧 *نتیجه فیکس فایروال:*"]
+            for name, ok in results.items():
+                lines.append(f"{'✅' if ok else '❌'} {name}: {'OK' if ok else 'FAILED'}")
+
+            await self._send("\n".join(lines), self._kb([[("🔄 بررسی مجدد", "mn_fwcheck"), ("↩️ برگشت", "mn_refresh")]]), chat_id=chat_id, parse_mode='Markdown')
+        except Exception as e:
+            await self._send(f"❌ خطا در فیکس فایروال: {e}", chat_id=chat_id)
 

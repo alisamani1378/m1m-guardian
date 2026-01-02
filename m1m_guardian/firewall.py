@@ -248,6 +248,125 @@ echo "VERIFY_COMPLETE"
         log.error("ensure_rule FAILED node=%s output=%s", spec.name, vtext.strip()[:400])
         # Don't add to _RULE_ENSURED so it will retry next time
 
+async def check_firewall_status(spec: NodeSpec) -> dict:
+    """
+    Check firewall status on a node and return diagnostic info.
+    Returns dict with keys: ok, backend, sets_exist, rules_exist, details
+    """
+    check_script = f'''SUDO=""; if [ "$(id -u)" != 0 ]; then if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi; fi
+BACKEND=$({_remote_detect_backend()})
+echo "BACKEND=$BACKEND"
+
+case "$BACKEND" in
+  "IPTABLES")
+    if command -v ipset >/dev/null 2>&1; then
+      echo "IPSET_INSTALLED=yes"
+      if $SUDO ipset list {SET_V4} >/dev/null 2>&1; then
+        COUNT4=$($SUDO ipset list {SET_V4} 2>/dev/null | grep -c "^[0-9]" || echo 0)
+        echo "SET_V4_EXISTS=yes count=$COUNT4"
+      else
+        echo "SET_V4_EXISTS=no"
+      fi
+      if $SUDO ipset list {SET_V6} >/dev/null 2>&1; then
+        COUNT6=$($SUDO ipset list {SET_V6} 2>/dev/null | grep -c "^[0-9]" || echo 0)
+        echo "SET_V6_EXISTS=yes count=$COUNT6"
+      else
+        echo "SET_V6_EXISTS=no"
+      fi
+    else
+      echo "IPSET_INSTALLED=no"
+    fi
+    
+    IPT=$(command -v iptables-nft || command -v iptables || command -v iptables-legacy || true)
+    if [ -n "$IPT" ]; then
+      echo "IPTABLES_CMD=$IPT"
+      if $IPT -S DOCKER-USER 2>/dev/null | grep -q "{SET_V4}"; then
+        echo "RULES_DOCKER_USER=yes"
+      elif $IPT -S INPUT 2>/dev/null | grep -q "{SET_V4}"; then
+        echo "RULES_INPUT=yes"
+      elif $IPT -S FORWARD 2>/dev/null | grep -q "{SET_V4}"; then
+        echo "RULES_FORWARD=yes"
+      else
+        echo "RULES_EXIST=no"
+      fi
+    else
+      echo "IPTABLES_CMD=none"
+    fi
+  ;;
+  "NFT")
+    echo "NFT_INSTALLED=yes"
+    if $SUDO nft list set inet filter {SET_V4} >/dev/null 2>&1; then
+      COUNT4=$($SUDO nft list set inet filter {SET_V4} 2>/dev/null | grep -c "timeout" || echo 0)
+      echo "SET_V4_EXISTS=yes count=$COUNT4"
+    else
+      echo "SET_V4_EXISTS=no"
+    fi
+    if $SUDO nft list set inet filter {SET_V6} >/dev/null 2>&1; then
+      echo "SET_V6_EXISTS=yes"
+    else
+      echo "SET_V6_EXISTS=no"
+    fi
+    if $SUDO nft list ruleset 2>/dev/null | grep -q "@{SET_V4}"; then
+      echo "RULES_EXIST=yes"
+    else
+      echo "RULES_EXIST=no"
+    fi
+  ;;
+  *)
+    echo "NO_BACKEND=true"
+  ;;
+esac
+'''
+    cmd = _ssh_base(spec) + [check_script]
+    try:
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        out, _ = await proc.communicate()
+        text = (out or b'').decode(errors='ignore')
+
+        result = {
+            "ok": False,
+            "backend": "unknown",
+            "sets_exist": False,
+            "rules_exist": False,
+            "details": text.strip(),
+            "cached_ensured": f"{spec.host}:{spec.ssh_port}" in _RULE_ENSURED
+        }
+
+        if "BACKEND=IPTABLES" in text:
+            result["backend"] = "iptables"
+            result["sets_exist"] = "SET_V4_EXISTS=yes" in text
+            result["rules_exist"] = any(x in text for x in ["RULES_DOCKER_USER=yes", "RULES_INPUT=yes", "RULES_FORWARD=yes"])
+        elif "BACKEND=NFT" in text:
+            result["backend"] = "nftables"
+            result["sets_exist"] = "SET_V4_EXISTS=yes" in text
+            result["rules_exist"] = "RULES_EXIST=yes" in text
+
+        result["ok"] = result["sets_exist"] and result["rules_exist"]
+        return result
+    except Exception as e:
+        return {
+            "ok": False,
+            "backend": "error",
+            "sets_exist": False,
+            "rules_exist": False,
+            "details": str(e),
+            "cached_ensured": f"{spec.host}:{spec.ssh_port}" in _RULE_ENSURED
+        }
+
+async def check_all_nodes_firewall(nodes: list[NodeSpec]) -> dict[str, dict]:
+    """
+    Check firewall status on all nodes concurrently.
+    Returns dict: node_name -> status_dict
+    """
+    tasks = {node.name: check_firewall_status(node) for node in nodes}
+    results = {}
+    for name, task in tasks.items():
+        try:
+            results[name] = await task
+        except Exception as e:
+            results[name] = {"ok": False, "error": str(e)}
+    return results
+
 async def force_ensure_all_nodes(nodes: list[NodeSpec]) -> dict[str, bool]:
     """
     Force re-run ensure_rule on all nodes and return status dict.
@@ -433,8 +552,18 @@ async def schedule_ban(spec: NodeSpec, ip: str, seconds: int) -> bool:
         ipaddress.ip_address(ip)
     except ValueError:
         return False
-    # DISABLED: auto ensure_rule - now manual via Telegram bot button
-    # await ensure_rule(spec)
+
+    # Check if firewall rules are ensured for this node
+    key = f"{spec.host}:{spec.ssh_port}"
+    if key not in _RULE_ENSURED:
+        # Try to ensure rules automatically before banning
+        log.warning("firewall rules not ensured for node=%s, attempting auto-ensure before ban ip=%s", spec.name, ip)
+        try:
+            await ensure_rule(spec, force=False)
+        except Exception as e:
+            log.error("auto-ensure failed node=%s err=%s, ban may fail", spec.name, e)
+        # even if ensure_rule fails, proceed with ban attempt in case rules exist but weren't cached
+
     st = await _ensure_worker(spec)
     async with st.lock:
         # backpressure: cap pending size; only refresh TTL for existing items when full
@@ -447,7 +576,7 @@ async def schedule_ban(spec: NodeSpec, ip: str, seconds: int) -> bool:
                 # overflow: drop this new IP to avoid unbounded growth
                 if st.last_report == 0.0 or (asyncio.get_event_loop().time() - st.last_report) > 5.0:
                     st.last_report = asyncio.get_event_loop().time()
-                    print(f"[guardian.batch] node={spec.name} pending_overflow size={len(st.pending)} cap={MAX_PENDING} dropping_new=true")
+                    log.warning("[guardian.batch] node=%s pending_overflow size=%d cap=%d dropping_new=true", spec.name, len(st.pending), MAX_PENDING)
                 return False
             st.pending[ip] = _BanItem(ip, seconds)
         st.event.set()
@@ -476,8 +605,7 @@ async def _worker_loop(spec: NodeSpec, st: _WorkerState):
             await _apply_batch(spec, items, st)
         except Exception as e:
             # log minimal; avoid crash loop
-            # use print to avoid import logging here
-            print(f"[guardian.batch] worker error node={spec.name} err={e}")
+            log.error("[guardian.batch] worker error node=%s err=%s", spec.name, e)
             await asyncio.sleep(0.5)
 
 async def _apply_batch(spec: NodeSpec, items: list[_BanItem], st: _WorkerState):
@@ -564,10 +692,14 @@ true'''
         # compute approx p95
         xs = sorted(st.latencies)
         p95 = xs[int(0.95*len(xs))-1] if xs else 0.0
-        print(f"[guardian.batch] node={spec.name} size={len(items)} pending={len(st.pending)} p95={p95:.3f}s last_latency={latency:.3f}s")
+        log.info("[guardian.batch] node=%s size=%d pending=%d p95=%.3fs last_latency=%.3fs", spec.name, len(items), len(st.pending), p95, latency)
     if proc.returncode != 0:
         text = (out or b'').decode(errors='ignore')
-        print(f"[guardian.batch] node={spec.name} rc={proc.returncode} out={text.strip()[:400]}")
+        log.warning("[guardian.batch] node=%s rc=%s out=%s", spec.name, proc.returncode, text.strip()[:400])
+        # Check if rule is properly ensured
+        key = f"{spec.host}:{spec.ssh_port}"
+        if key not in _RULE_ENSURED:
+            log.error("firewall rules NOT ensured for node=%s - run ensure_rule manually or via Telegram bot", spec.name)
         # simple retry once: reinsert items
         async with st.lock:
             for it in items:
