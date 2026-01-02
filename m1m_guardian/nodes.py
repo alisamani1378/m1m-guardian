@@ -166,12 +166,12 @@ async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
             "exec $SUDO docker exec -i \"$TARGET\" sh -c '"
             "if ! command -v pgrep >/dev/null 2>&1; then (apk add --no-cache procps 2>/dev/null || (apt-get update -y >/dev/null 2>&1 && apt-get install -y procps >/dev/null 2>&1) || yum install -y procps-ng >/dev/null 2>&1 || true); fi; "
             "while true; do "
-            "if command -v pgrep >/dev/null 2>&1; then pid=$(pgrep -xo xray); else pid=$(ps aux 2>/dev/null | grep -i xray | grep -v grep | head -1 | awk \"{print \\$2}\"); fi; "
-            "if [ -z \"$pid\" ]; then echo \"[guardian-stream] no_xray_process\"; sleep 5; continue; fi; "
-            "if [ ! -r /proc/$pid/fd/1 ]; then echo \"[guardian-stream] fd_unreadable pid=$pid\"; sleep 5; continue; fi; "
+            "if command -v pgrep >/dev/null 2>&1; then pid=$(pgrep -xo xray); else pid=$(ps | grep -i xray | grep -v grep | awk \"{print \\$1; exit}\"); fi; "
+            "if [ -z \"$pid\" ]; then echo \"[guardian-stream] no_xray_process\"; sleep 2; continue; fi; "
+            "if [ ! -r /proc/$pid/fd/1 ]; then echo \"[guardian-stream] fd_unreadable pid=$pid\"; sleep 2; continue; fi; "
             "echo \"[guardian-stream] follow pid=$pid\"; "
-            "tail -n 0 -F /proc/$pid/fd/1 2>/dev/null; "
-            "sleep 2; done'"
+            "cat /proc/$pid/fd/1 /proc/$pid/fd/2 2>/dev/null || true; "
+            "sleep 1; done'"
         )
         cmd = _ssh_base(spec) + ["sh","-lc", remote_script]
         log.debug("starting direct stream (no-fallback) node=%s cmd=%s", spec.name, ' '.join(cmd))
@@ -236,4 +236,4 @@ async def stream_logs(spec:NodeSpec) -> AsyncIterator[str]:
             else:
                 failure_streak=0
             # Do not yield inside finally to avoid GeneratorExit issues.
-            await asyncio.sleep(6)
+            await asyncio.sleep(4)
