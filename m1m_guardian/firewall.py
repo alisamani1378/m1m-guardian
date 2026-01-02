@@ -386,14 +386,8 @@ esac
             result["rules_forward"] = "RULES_FORWARD=yes" in text
             result["rules_docker"] = "RULES_DOCKER_USER=yes" in text
 
-            # Rules are OK if INPUT is set AND (DOCKER-USER or FORWARD depending on Docker presence)
-            if result["rules_input"]:
-                if result["has_docker"]:
-                    result["rules_exist"] = result["rules_docker"]
-                else:
-                    result["rules_exist"] = result["rules_forward"]
-            else:
-                result["rules_exist"] = False
+            # Rules are OK if they exist in ANY of the chains (INPUT, FORWARD, or DOCKER-USER)
+            result["rules_exist"] = result["rules_input"] or result["rules_forward"] or result["rules_docker"]
         elif "BACKEND=NFT" in text:
             result["backend"] = "nftables"
             result["sets_exist"] = "SET_V4_EXISTS=yes" in text
